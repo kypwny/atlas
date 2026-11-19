@@ -16,11 +16,12 @@
 //!
 //! Oodle comes from the game's `oo2core_8_win64.dll` ([`crate::oodle`]); nothing is decrypted.
 
+use crate::hashindex::{self, HashIndex};
 use crate::kapi::{self, Kapi, Kind};
 use crate::oodle::{self, Oodle};
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const MAGIC: &[u8; 8] = b"IWffa100";
@@ -362,8 +363,9 @@ pub fn find_strings(image: &[u8], samples: usize) -> StringReport {
 // ---------------------------------------------------------------------------------------------------------------------------
 // the command
 
-const USAGE: &str = "usage: atlas --hqinfo FILE|FOLDER [-v] [--strings] [--deep] [--sample N] [--dump DIR] [--oodle DLL]\n\
-  opens Call of Duty HQ (cod26) containers offline: .ff fastfiles and .xpak/.xsub packages; prints one line per file and a survey";
+const USAGE: &str = "usage: atlas --hqinfo FILE|FOLDER [-v] [--strings] [--deep] [--sample N] [--dump DIR] [--oodle DLL] [--hashes FILE.wni]\n\
+  opens Call of Duty HQ (cod26) containers offline: .ff fastfiles and .xpak/.xsub packages; prints one line per file and a survey\n\
+  --hashes (or ATLAS_HASHES): a WNI hash index (ate47 HashIndex); package entries get their name when the key resolves, --dump DIR then also writes names.tsv";
 
 pub struct ZoneReport {
     /// The zone without its image (that is dropped once the lists are read).
@@ -399,6 +401,11 @@ pub struct PackReport {
     pub cross_matched: usize,
     pub cross_mismatched: usize,
     pub cross_unknown: usize,
+    /// Entries whose key the hash index resolves (0 without an index), the first few of them, and with `--dump` all of them
+    /// as (key, name, decoded size).
+    pub names_resolved: usize,
+    pub name_samples: Vec<(u64, String)>,
+    pub names: Vec<(u64, String, u32)>,
 }
 
 pub enum Report {
@@ -415,6 +422,18 @@ pub struct Options {
     pub sample: usize,
     /// Write the inflated zone images here (`NAME.img`).
     pub dump: Option<PathBuf>,
+    /// Hash index used to name package entries and record types.
+    pub hashes: Option<std::sync::Arc<HashIndex>>,
+}
+
+/// Name of a record type: the built-in table of type names (FNV-1a 32 of the name), then the index.
+fn type_name(t: u64, ix: Option<&HashIndex>) -> Option<String> {
+    if t <= u32::MAX as u64 {
+        if let Some(n) = hashindex::asset_type_name(t as u32) {
+            return Some(n.to_string());
+        }
+    }
+    ix.and_then(|i| i.lookup(t)).map(str::to_string)
 }
 
 fn fmt_n(n: u64) -> String {
@@ -458,6 +477,19 @@ pub fn inspect(path: &Path, oodle: Option<&Oodle>, opt: &Options) -> Result<Repo
 fn inspect_pack(path: &Path, oodle: Option<&Oodle>, opt: &Options) -> Result<PackReport> {
     let k = Kapi::open(path)?;
     let mut r = PackReport { kapi_kind: Some(k.kind), file_size: k.file_size, id: k.id, stats: k.stats(), subs: k.subs.len(), ..Default::default() };
+    if let Some(ix) = &opt.hashes {
+        for e in &k.entries {
+            if let Some(n) = e.name(ix) {
+                r.names_resolved += 1;
+                if r.name_samples.len() < 5 {
+                    r.name_samples.push((e.key, n.to_string()));
+                }
+                if opt.dump.is_some() {
+                    r.names.push((e.key, n.to_string(), e.ex));
+                }
+            }
+        }
+    }
     fn note(codecs: &mut [usize; 8], i: &kapi::PayloadInfo) {
         for (a, b) in codecs.iter_mut().zip(i.codecs) {
             *a += b;
@@ -583,7 +615,10 @@ fn describe(label: &str, rep: &Report, opt: &Options) -> String {
                     let p: Vec<String> = ptrs.iter().take(4).map(|(p, n)| format!("{p:#x} x{n}")).collect();
                     s += &format!("\n    record pointers: {}", p.join(", "));
                     for (t, n) in l.histogram() {
-                        s += &format!("\n    type {t:#010x}: {n}");
+                        match type_name(t, opt.hashes.as_deref()) {
+                            Some(name) => s += &format!("\n    type {t:#010x} ({name}): {n}"),
+                            None => s += &format!("\n    type {t:#010x}: {n}"),
+                        }
                     }
                 }
                 if let Some(st) = &z.strings {
@@ -633,6 +668,9 @@ fn describe(label: &str, rep: &Report, opt: &Options) -> String {
                 }
                 _ => {}
             }
+            if opt.hashes.is_some() {
+                s += &format!("  names resolved {} of {} ({:.1}%)", fmt_n(p.names_resolved as u64), fmt_n(st.entries as u64), 100.0 * p.names_resolved as f64 / st.entries.max(1) as f64);
+            }
             if st.unsorted || st.duplicate_keys > 0 || st.out_of_range > 0 {
                 s += &format!("  odd: unsorted {} duplicate keys {} out of range {}", st.unsorted, st.duplicate_keys, st.out_of_range);
             }
@@ -640,6 +678,9 @@ fn describe(label: &str, rep: &Report, opt: &Options) -> String {
                 s += &format!("\n    id {:#018x}; entries per xsub {:?}", p.id, st.per_sub);
                 for f in p.header_failures.iter().chain(&p.decode_failures) {
                     s += &format!("\n    failure: {f}");
+                }
+                for (key, name) in &p.name_samples {
+                    s += &format!("\n    name {key:#018x} {name}");
                 }
             }
             s
@@ -685,6 +726,9 @@ struct Survey {
     cross_bad: usize,
     subs_missing: usize,
     by_kind: BTreeMap<&'static str, (usize, u64, u64)>,
+    /// Payload keys of the xsub files and how many of them the hash index resolves.
+    name_keys: u64,
+    name_resolved: u64,
 }
 
 fn collect(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -705,7 +749,8 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 pub fn command(args: &[String]) -> Result<()> {
-    let mut opt = Options { verbose: false, strings: false, deep: false, sample: 24, dump: None };
+    let mut opt = Options { verbose: false, strings: false, deep: false, sample: 24, dump: None, hashes: None };
+    let mut index_arg: Option<String> = None;
     let mut path: Option<&String> = None;
     let mut dll: Option<PathBuf> = None;
     let mut i = 0;
@@ -721,6 +766,10 @@ pub fn command(args: &[String]) -> Result<()> {
             "--dump" => {
                 i += 1;
                 opt.dump = Some(PathBuf::from(args.get(i).context("--dump needs a folder")?));
+            }
+            "--hashes" => {
+                i += 1;
+                index_arg = Some(args.get(i).context("--hashes needs a .wni file")?.clone());
             }
             "--oodle" => {
                 i += 1;
@@ -753,6 +802,21 @@ pub fn command(args: &[String]) -> Result<()> {
             None
         }
     };
+    if let Some(p) = hashindex::index_path(index_arg.as_deref()) {
+        let t = std::time::Instant::now();
+        let ix = HashIndex::open(&p)?;
+        eprintln!("Hash index: {} ({} hashes, {} skipped, {:.1} s)", p.display(), fmt_n(ix.len() as u64), ix.skipped, t.elapsed().as_secs_f64());
+        opt.hashes = Some(std::sync::Arc::new(ix));
+    }
+    let mut names_out = match (&opt.dump, &opt.hashes) {
+        (Some(dir), Some(_)) => {
+            std::fs::create_dir_all(dir)?;
+            let mut w = std::io::BufWriter::new(std::fs::File::create(dir.join("names.tsv"))?);
+            writeln!(w, "key\tname\tsize\tpackage")?;
+            Some(w)
+        }
+        _ => None,
+    };
     let started = std::time::Instant::now();
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).clamp(1, 6);
     let mut sv = Survey::default();
@@ -782,6 +846,11 @@ pub fn command(args: &[String]) -> Result<()> {
             match r {
                 Ok(rep) => {
                     println!("{}", describe(&label, &rep, &opt));
+                    if let (Some(w), Report::Pack(p)) = (names_out.as_mut(), &rep) {
+                        for (key, name, size) in &p.names {
+                            writeln!(w, "{key:#018x}\t{}\t{size}\t{label}", name.replace(['\t', '\r', '\n'], " "))?;
+                        }
+                    }
                     sv.add(f, &rep);
                 }
                 Err(e) => {
@@ -800,7 +869,10 @@ pub fn command(args: &[String]) -> Result<()> {
             }
         }
     }
-    sv.print(started.elapsed().as_secs_f64(), opt.verbose);
+    sv.print(started.elapsed().as_secs_f64(), opt.verbose, opt.hashes.as_deref());
+    if let Some(w) = names_out.as_mut() {
+        w.flush()?;
+    }
     Ok(())
 }
 
@@ -875,6 +947,8 @@ impl Survey {
                     }
                     self.pack_decoded += p.decoded;
                     self.pack_failures += p.header_failures.len() + p.decode_failures.len();
+                    self.name_keys += p.stats.entries as u64;
+                    self.name_resolved += p.names_resolved as u64;
                 }
                 self.cross_matched += p.cross_matched;
                 self.cross_bad += p.cross_mismatched + p.cross_unknown;
@@ -883,7 +957,7 @@ impl Survey {
         }
     }
 
-    fn print(&self, secs: f64, verbose: bool) {
+    fn print(&self, secs: f64, verbose: bool, ix: Option<&HashIndex>) {
         println!("\nsurvey: {} files, {} bytes on disk, {:.1} s", self.files, fmt_n(self.file_bytes), secs);
         let refused: usize = self.refused.values().map(Vec::len).sum();
         let failed: usize = self.failed.values().map(Vec::len).sum();
@@ -920,7 +994,8 @@ impl Survey {
             top.sort_by(|a, b| b.1.0.cmp(&a.1.0));
             let n = if verbose { top.len() } else { 15 };
             for (t, (count, zones)) in top.into_iter().take(n) {
-                println!("    type {t:#010x}: {} assets in {zones} zones", fmt_n(*count as u64));
+                let name = type_name(*t, ix).map(|n| format!(" ({n})")).unwrap_or_default();
+                println!("    type {t:#010x}{name}: {} assets in {zones} zones", fmt_n(*count as u64));
             }
             if self.strings.zlib_streams > 0 || self.strings.plain > 0 {
                 println!(
@@ -950,6 +1025,14 @@ impl Survey {
                 self.pack_decoded,
                 self.pack_failures
             );
+            if ix.is_some() {
+                println!(
+                    "  names: {} of {} xsub payload keys resolved by the hash index ({:.2}%)",
+                    fmt_n(self.name_resolved),
+                    fmt_n(self.name_keys),
+                    100.0 * self.name_resolved as f64 / self.name_keys.max(1) as f64
+                );
+            }
             println!("  xpak cross-check: {} entries match their xsub table, {} do not, {} xsub files missing", fmt_n(self.cross_matched as u64), fmt_n(self.cross_bad as u64), self.subs_missing);
         }
     }

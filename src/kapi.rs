@@ -49,6 +49,10 @@ impl Entry {
     pub fn sub(&self) -> u32 {
         (self.packed >> 55) as u32
     }
+    /// The name of the entry's key in a hash index (the low 60 bits are compared), if the index has it.
+    pub fn name<'a>(&self, index: &'a crate::hashindex::HashIndex) -> Option<&'a str> {
+        index.lookup(self.key)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

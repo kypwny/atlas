@@ -51,6 +51,9 @@ atlas is licensed GPL-3.0-only (see LICENSE).
   (the `IWffa100` block header idea, the `KAPI` entry table, loading the game's own Oodle DLL) come from the public design notes of
   **harmony** (https://github.com/g-rl/harmony, no licence stated, so none of its code was read or used); everything was
   re-measured on the installed files.
+- `src/hashindex.rs` (reader for `.wni` hash index files, the FNV-1a name hashes): the file format and the hash algorithm descriptions were
+  read from the documentation of **HashIndex** by ate47 (https://github.com/ate47/HashIndex, MIT); no code from it was used, and no index data
+  is bundled or downloaded: the user supplies the `.wni` file.
 - `tools/blender_cast_check.py` runs Blender with dtzxporter's **Cast** add-on (MIT, https://github.com/dtzxporter/cast) headless; the
   Cast writer in `src/export/cast.rs` follows that project's format description and the add-on's property type ids.
 - The 64-bit Modern Warfare 3 corrections in `tools/gen_zone_schema.py` (`FIXES`) were read from the game's own loader functions by

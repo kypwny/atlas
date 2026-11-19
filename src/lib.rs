@@ -9,6 +9,7 @@ pub mod data;
 pub mod dds;
 pub mod export;
 pub mod gameinfo;
+pub mod hashindex;
 pub mod ifs;
 pub mod ifs_cache;
 pub mod iwd;
