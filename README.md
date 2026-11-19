@@ -2,7 +2,7 @@
 
 # atlas
 
-Open Call of Duty fastfiles, export models and maps to Cast for Blender, and edit zones.
+Open Call of Duty fastfiles, export models and maps to [Cast](https://github.com/dtzxporter/cast) for Blender, and edit zones.
 
 ![the Monkey King amusement park map in the Maps tab](docs/images/preview.png)
 
