@@ -1,0 +1,400 @@
+iw4_offset	name	type	qa_offset	iw4_qa_match	c319_offset	qa_319_match
+0	szInternalName	const char*				
+4	weapDef	WeaponDef*				
+8	szDisplayName	const char*				
+12	hideTags	unsigned __int16*				
+16	szXAnims	const char**				
+20	fAdsZoomFov	float	2756	0.95	3100	1.0
+24	iAdsTransInTime	int	2768	0.76	3112	1.0
+28	iAdsTransOutTime	int	2772	0.74	3116	1.0
+32	iClipSize	int	3336	0.85	3688	1.0
+36	impactType	ImpactType	3340	0.96	3692	1.0
+40	iFireTime	int	3344	0.48	3696	1.0
+44	dpadIconRatio	weaponIconRatioType_t	3348	0.96	3700	1.0
+48	penetrateMultiplier	float	3356	0.71	3708	1.0
+52	fAdsViewKickCenterSpeed	float				
+56	fHipViewKickCenterSpeed	float				
+60	szAltWeaponName	const char*				
+64	altWeaponIndex	unsigned int				
+68	iAltRaiseTime	int	1888	0.31	2208	1.0
+72	killIcon	Material*				
+76	dpadIcon	Material*	3392	0.7	3752	0.74
+80	fireAnimLength	int	3400	0.93	3760	0.97
+84	iFirstRaiseTime	int	3404	0.61	3764	1.0
+88	ammoDropStockMax	int	3408	0.8	3768	1.0
+92	adsDofStart	float	3448	0.67		
+96	adsDofEnd	float	3452	0.68	3816	0.92
+100	accuracyGraphKnotCount	unsigned __int16[2]	3456	0.93	3832	0.93
+112	motionTracker	bool				
+113	enhanced	bool				
+114	dpadIconShowsAmmo	bool				
+116	szOverlayName	const char*				
+120	gunXModel	XModel**				
+124	handXModel	XModel*				
+128	szXAnimsRightHanded	const char**				
+132	szXAnimsLeftHanded	const char**				
+136	szModeName	const char*				
+140	notetrackSoundMapKeys	unsigned __int16*				
+144	notetrackSoundMapValues	unsigned __int16*				
+148	notetrackRumbleMapKeys	unsigned __int16*				
+152	notetrackRumbleMapValues	unsigned __int16*				
+156	playerAnimType	int	1144	1.0	1412	0.99
+160	weapType	weapType_t	1148	1.0	1416	1.0
+164	weapClass	weapClass_t	1152	0.96	1420	1.0
+168	penetrateType	PenetrateType	1156	0.98	1424	1.0
+172	inventoryType	weapInventoryType_t	1160	1.0	1428	1.0
+176	fireType	weapFireType_t	1164	0.94	1432	1.0
+180	offhandClass	OffhandClass	1168	1.0	1436	1.0
+184	stance	weapStance_t	1172	1.0	1440	1.0
+188	viewFlashEffect	void*				
+192	worldFlashEffect	void*				
+384	bounceSound	snd_alias_list_t**	1400	0.79	1708	0.78
+388	viewShellEjectEffect	void*	1408	0.7	1716	0.53
+392	worldShellEjectEffect	void*	1412	0.65	1720	0.52
+396	viewLastShotEjectEffect	void*	1416	0.7	1724	0.53
+400	worldLastShotEjectEffect	void*	1420	0.65	1728	0.52
+404	reticleCenter	Material*				
+408	reticleSide	Material*	1428	0.66	1736	0.5
+412	iReticleCenterSize	int	1432	0.9	1740	1.0
+416	iReticleSideSize	int	1436	0.99	1744	1.0
+420	iReticleMinOfs	int	1440	1.0	1748	1.0
+424	activeReticleType	activeReticleType_t	1444	1.0	1752	1.0
+428	vStandMove	float[3]	1448	1.0	1756	1.0
+440	vStandRot	float[3]	1460	0.97	1768	1.0
+452	strafeMove	float[3]	1472	1.0	1780	1.0
+464	strafeRot	float[3]	1484	1.0	1792	1.0
+476	vDuckedOfs	float[3]	1496	0.97	1804	1.0
+488	vDuckedMove	float[3]	1508	0.96	1816	1.0
+500	vDuckedRot	float[3]	1520	0.97	1828	1.0
+512	vProneOfs	float[3]	1532	0.92	1840	1.0
+524	vProneMove	float[3]	1544	0.96	1852	1.0
+536	vProneRot	float[3]	1556	1.0	1864	1.0
+548	fPosMoveRate	float	1604	1.0	1912	1.0
+552	fPosProneMoveRate	float	1608	0.97	1916	1.0
+556	fStandMoveMinSpeed	float	1612	0.97	1920	1.0
+560	fDuckedMoveMinSpeed	float	1616	0.97	1924	1.0
+564	fProneMoveMinSpeed	float	1620	1.0	1928	1.0
+568	fPosRotRate	float	1624	1.0	1932	1.0
+572	fPosProneRotRate	float	1628	0.97	1936	1.0
+576	fStandRotMinSpeed	float	1632	0.97	1940	1.0
+580	fDuckedRotMinSpeed	float	1636	0.97	1944	1.0
+584	fProneRotMinSpeed	float	1652	1.0	1960	1.0
+588	worldModel	XModel**				
+592	worldClipModel	XModel*	1656	0.96	1964	1.0
+596	rocketModel	XModel*	1660	0.98	1968	1.0
+600	knifeModel	XModel*				
+604	worldKnifeModel	XModel*				
+608	hudIcon	Material*				
+612	hudIconRatio	weaponIconRatioType_t	1668	0.94	1976	0.93
+616	pickupIcon	Material*	1672	0.68	1980	0.51
+620	pickupIconRatio	weaponIconRatioType_t	1676	0.71	1984	0.98
+624	ammoCounterIcon	Material*				
+628	ammoCounterIconRatio	weaponIconRatioType_t	1684	0.99	1992	1.0
+632	ammoCounterClip	ammoCounterClipType_t	1688	0.94	1996	1.0
+636	iStartAmmo	int				
+640	szAmmoName	const char*				
+644	iAmmoIndex	int	1720	1.0	2028	1.0
+648	szClipName	const char*				
+652	iClipIndex	int	1728	1.0	2036	1.0
+656	iMaxAmmo	int				
+660	shotCount	int	1736	0.94	2044	1.0
+664	szSharedAmmoCapName	const char*				
+668	iSharedAmmoCapIndex	int	1744	1.0	2052	1.0
+672	iSharedAmmoCap	int	1748	0.96	2056	1.0
+676	damage	int				
+680	playerDamage	int	1752	0.97	2064	1.0
+684	iMeleeDamage	int	1760	0.98	2072	1.0
+688	iDamageType	int	1772	1.0	2084	0.99
+692	iFireDelay	int	1776	0.86	2088	1.0
+696	iMeleeDelay	int	1780	0.42	2092	1.0
+700	meleeChargeDelay	int	1784	0.96	2096	1.0
+704	iDetonateDelay	int	1788	1.0	2104	1.0
+708	iRechamberTime	int	1792	0.73	2108	1.0
+712	rechamberTimeOneHanded	int	1796	0.82	2112	1.0
+716	iRechamberBoltTime	int	1800	0.97	2116	1.0
+720	iHoldFireTime	int	1804	1.0	2120	0.86
+724	iDetonateTime	int	1808	0.92	2124	1.0
+728	iMeleeTime	int	1812	0.58	2128	1.0
+732	meleeChargeTime	int	1816	0.42	2132	1.0
+736	iReloadTime	int	1820	0.59	2140	1.0
+740	reloadShowRocketTime	int	1828	0.99	2148	1.0
+744	iReloadEmptyTime	int	1832	0.7	2152	1.0
+748	iReloadAddTime	int	1840	0.64	2160	1.0
+752	iReloadStartTime	int	1856	0.98	2176	1.0
+756	iReloadStartAddTime	int	1860	0.91	2180	1.0
+760	iReloadEndTime	int	1864	0.91	2184	1.0
+764	iDropTime	int	1868	0.54	2188	1.0
+768	iRaiseTime	int	1872	0.59	2192	1.0
+772	iAltDropTime	int	1876	0.99	2196	1.0
+776	quickDropTime	int	1880	0.9	2200	1.0
+780	quickRaiseTime	int	1884	0.75	2204	1.0
+784	iBreachRaiseTime	int	1912	0.99	2232	1.0
+788	iEmptyRaiseTime	int	1892	0.67	2212	1.0
+792	iEmptyDropTime	int	1896	0.61	2216	1.0
+796	sprintInTime	int	1900	0.63	2220	1.0
+800	sprintLoopTime	int	1904	0.52	2224	1.0
+804	sprintOutTime	int	1908	0.68	2228	1.0
+808	stunnedTimeBegin	int	1916	1.0	2236	1.0
+812	stunnedTimeLoop	int	1920	1.0	2240	1.0
+816	stunnedTimeEnd	int				
+820	nightVisionWearTime	int				
+824	nightVisionWearTimeFadeOutEnd	int				
+828	nightVisionWearTimePowerUp	int				
+832	nightVisionRemoveTime	int				
+836	nightVisionRemoveTimePowerDown	int				
+840	nightVisionRemoveTimeFadeInStart	int	1960	0.91	2280	0.6
+844	fuseTime	int	1964	0.99	2284	1.0
+848	aiFuseTime	int	1968	1.0	2288	1.0
+852	autoAimRange	float	1972	0.7	2292	1.0
+856	aimAssistRange	float	1976	0.9	2296	1.0
+860	aimAssistRangeAds	float	1980	0.81	2300	1.0
+864	aimPadding	float	1984	0.99	2304	1.0
+868	enemyCrosshairRange	float	1988	0.88	2308	1.0
+872	moveSpeedScale	float	1992	0.77	2312	0.98
+876	adsMoveSpeedScale	float	1996	0.88	2316	0.99
+880	sprintDurationScale	float	2000	1.0	2320	1.0
+884	fAdsZoomInFrac	float	2004	0.91	2324	1.0
+888	fAdsZoomOutFrac	float	2008	0.94	2328	1.0
+892	overlayMaterial	Material*	2012	0.98	2332	1.0
+896	overlayMaterialLowRes	Material*	2016	0.98	2336	1.0
+900	overlayMaterialEMP	Material*	2020	1.0	2340	1.0
+904	overlayMaterialEMPLowRes	Material*	2024	1.0	2344	1.0
+908	overlayReticle	weapOverlayReticle_t	2028	0.98	2348	1.0
+912	overlayInterface	int	2032	1.0	2352	1.0
+916	overlayWidth	float	2036	0.98	2356	1.0
+920	overlayHeight	float	2040	0.98	2360	1.0
+924	overlayWidthSplitscreen	float	2044	0.99	2364	1.0
+928	overlayHeightSplitscreen	float	2048	0.99	2368	1.0
+932	fAdsBobFactor	float				
+936	fAdsViewBobMult	float				
+940	fHipSpreadStandMin	float	2064	0.83	2384	0.97
+944	fHipSpreadDuckedMin	float	2068	0.83	2388	0.97
+948	fHipSpreadProneMin	float	2072	0.84	2392	0.99
+952	hipSpreadStandMax	float	2076	0.75	2396	0.97
+956	hipSpreadDuckedMax	float	2080	0.77	2400	0.97
+960	hipSpreadProneMax	float	2084	0.71	2404	0.99
+964	fHipSpreadDecayRate	float	2088	0.87	2408	0.98
+968	fHipSpreadFireAdd	float	2092	0.78	2412	0.88
+972	fHipSpreadTurnAdd	float	2096	1.0	2416	1.0
+976	fHipSpreadMoveAdd	float	2100	0.71	2420	0.57
+980	fHipSpreadDuckedDecay	float	2104	0.84	2424	0.98
+984	fHipSpreadProneDecay	float	2108	0.84	2428	1.0
+988	fHipReticleSidePos	float	2112	1.0	2432	1.0
+992	fAdsIdleAmount	float	2116	0.87	2436	1.0
+996	fHipIdleAmount	float	2120	0.99	2440	1.0
+1000	adsIdleSpeed	float	2124	0.71	2444	1.0
+1004	hipIdleSpeed	float	2128	0.91	2448	1.0
+1008	fIdleCrouchFactor	float	2132	0.83	2452	1.0
+1012	fIdleProneFactor	float	2136	0.95	2456	1.0
+1016	fGunMaxPitch	float	2140	0.97	2460	1.0
+1020	fGunMaxYaw	float	2144	0.97	2464	1.0
+1024	swayMaxAngle	float	2164	0.65	2484	1.0
+1028	swayLerpSpeed	float	2168	0.65	2488	1.0
+1032	swayPitchScale	float	2176	0.98	2496	1.0
+1036	swayYawScale	float	2180	0.66	2500	1.0
+1040	swayHorizScale	float	2184	0.93	2504	1.0
+1044	swayVertScale	float				
+1048	swayShellShockScale	float				
+1052	adsSwayMaxAngle	float				
+1056	adsSwayLerpSpeed	float	2196	0.66	2516	1.0
+1060	adsSwayPitchScale	float	2200	0.75	2520	1.0
+1064	adsSwayYawScale	float	2204	0.75	2524	1.0
+1068	adsSwayHorizScale	float	2208	0.69	2528	1.0
+1072	adsSwayVertScale	float	2212	0.71	2532	1.0
+1076	adsViewErrorMin	float	2216	1.0	2536	1.0
+1080	adsViewErrorMax	float	2220	1.0	2540	1.0
+1084	physCollmap	PhysCollmap*				
+1088	dualWieldViewModelOffset	float	2232	0.96	2552	1.0
+1092	killIconRatio	weaponIconRatioType_t	2236	0.91	2556	0.99
+1096	iReloadAmmoAdd	int	2240	0.99	2564	1.0
+1100	iReloadStartAdd	int	2244	0.99	2568	1.0
+1104	ammoDropStockMin	int	2252	0.98	2576	1.0
+1108	ammoDropClipPercentMin	int	2256	1.0	2580	1.0
+1112	ammoDropClipPercentMax	int	2260	0.98	2584	1.0
+1116	iExplosionRadius	int	2264	0.94	2588	1.0
+1120	iExplosionRadiusMin	int	2268	1.0	2592	1.0
+1124	iExplosionInnerDamage	int	2272	0.97	2596	1.0
+1128	iExplosionOuterDamage	int	2276	0.96	2600	1.0
+1132	damageConeAngle	float	2280	1.0	2604	1.0
+1136	bulletExplDmgMult	float	2284	1.0	2608	1.0
+1140	bulletExplRadiusMult	float	2288	0.99	2612	1.0
+1144	iProjectileSpeed	int	2292	0.98	2616	1.0
+1148	iProjectileSpeedUp	int	2296	0.97	2620	1.0
+1152	iProjectileSpeedForward	int	2300	0.99	2636	1.0
+1156	iProjectileActivateDist	int	2304	0.99	2640	1.0
+1160	projLifetime	float	2308	0.98	2644	1.0
+1164	timeToAccelerate	float	2312	1.0	2648	1.0
+1168	projectileCurvature	float	2316	1.0	2652	1.0
+1172	projectileModel	XModel*	2320	0.65	2656	0.81
+1176	projExplosion	int	2324	0.99	2660	1.0
+1180	projExplosionEffect	void*	2328	0.9	2664	0.91
+1184	projDudEffect	void*	2332	0.91	2668	0.93
+1188	projExplosionSound	snd_alias_list_t*	2336	0.91	2672	0.9
+1192	projDudSound	snd_alias_list_t*	2340	0.93	2676	0.94
+1196	stickiness	WeapStickinessType	2344	1.0	2680	1.0
+1200	lowAmmoWarningThreshold	float	2348	0.97	2684	1.0
+1204	ricochetChance	float	2352	1.0	2688	1.0
+1208	parallelBounce	float*				
+1212	perpendicularBounce	float*				
+1216	projTrailEffect	void*	2616	0.74	2952	0.81
+1220	projBeaconEffect	void*	2620	0.97	2956	0.99
+1224	vProjectileColor	float[3]	2624	1.0	2960	1.0
+1236	guidedMissileType	guidedMissileType_t	2636	1.0	2972	1.0
+1240	maxSteeringAccel	float	2640	0.84	2976	1.0
+1244	projIgnitionDelay	int	2644	0.99	2980	1.0
+1248	projIgnitionEffect	void*	2648	0.96	2984	0.98
+1252	projIgnitionSound	snd_alias_list_t*	2652	1.0	2988	0.98
+1256	fAdsAimPitch	float	2672	0.99	3016	1.0
+1260	fAdsCrosshairInFrac	float	2676	0.88	3020	1.0
+1264	fAdsCrosshairOutFrac	float	2680	0.88	3024	1.0
+1268	adsGunKickReducedKickBullets	int	2684	0.99	3028	1.0
+1272	adsGunKickReducedKickPercent	float	2688	0.97	3032	1.0
+1276	fAdsGunKickPitchMin	float	2692	0.83	3036	0.99
+1280	fAdsGunKickPitchMax	float	2696	0.82	3040	0.99
+1284	fAdsGunKickYawMin	float	2700	0.87	3044	0.99
+1288	fAdsGunKickYawMax	float	2704	0.84	3048	0.99
+1292	fAdsGunKickAccel	float	2708	0.9	3052	1.0
+1296	fAdsGunKickSpeedMax	float	2712	0.97	3056	1.0
+1300	fAdsGunKickSpeedDecay	float	2716	0.9	3060	1.0
+1304	fAdsGunKickStaticDecay	float	2720	0.9	3064	1.0
+1308	fAdsViewKickPitchMin	float				
+1312	fAdsViewKickPitchMax	float	2732	0.76	3076	0.98
+1316	fAdsViewKickYawMin	float	2736	0.69	3080	0.98
+1320	fAdsViewKickYawMax	float	2740	0.69	3084	0.98
+1324	fAdsViewScatterMin	float	2744	1.0	3088	1.0
+1328	fAdsViewScatterMax	float	2748	1.0	3092	1.0
+1332	fAdsSpread	float	2752	0.85	3096	0.92
+1336	hipGunKickReducedKickBullets	int	2776	0.99	3120	1.0
+1340	hipGunKickReducedKickPercent	float	2780	0.97	3124	1.0
+1344	fHipGunKickPitchMin	float	2784	0.8	3128	1.0
+1348	fHipGunKickPitchMax	float	2788	0.8	3132	1.0
+1352	fHipGunKickYawMin	float	2792	0.8	3136	1.0
+1356	fHipGunKickYawMax	float	2796	0.8	3140	1.0
+1360	fHipGunKickAccel	float	2800	0.97	3144	1.0
+1364	fHipGunKickSpeedMax	float	2804	0.93	3148	1.0
+1368	fHipGunKickSpeedDecay	float	2808	0.94	3152	1.0
+1372	fHipGunKickStaticDecay	float	2812	0.91	3156	1.0
+1376	fHipViewKickPitchMin	float				
+1380	fHipViewKickPitchMax	float	2824	0.73	3168	0.99
+1384	fHipViewKickYawMin	float	2828	0.7	3172	0.99
+1388	fHipViewKickYawMax	float	2832	0.7	3176	0.99
+1392	fHipViewScatterMin	float	2836	1.0	3180	1.0
+1396	fHipViewScatterMax	float	2840	1.0	3184	1.0
+1400	fightDist	float	2844	1.0	3188	1.0
+1404	maxDist	float	2848	0.84	3192	1.0
+1408	accuracyGraphName	const char*[2]				
+1424	originalAccuracyGraphKnotCount	unsigned __int16[2]	2868	0.65	3212	1.0
+1428	iPositionReloadTransTime	int	2872	0.82	3216	1.0
+1432	leftArc	float	2876	0.99	3220	1.0
+1436	rightArc	float	2880	0.99	3224	1.0
+1440	topArc	float	2884	0.99	3228	1.0
+1444	bottomArc	float	2888	0.99	3232	1.0
+1448	accuracy	float	2892	0.99	3240	1.0
+1452	aiSpread	float	2896	0.99	3244	1.0
+1456	playerSpread	float	2900	0.99	3248	1.0
+1460	minTurnSpeed	float[2]	2904	0.99	3252	1.0
+1468	maxTurnSpeed	float[2]	2912	0.99	3260	1.0
+1476	pitchConvergenceTime	float	2920	0.99	3268	1.0
+1480	yawConvergenceTime	float	2924	0.99	3272	1.0
+1484	suppressTime	float	2928	0.99	3276	1.0
+1488	maxRange	float	2932	1.0	3280	1.0
+1492	fAnimHorRotateInc	float	2936	0.99	3284	1.0
+1496	fPlayerPositionDist	float	2940	0.99	3288	1.0
+1500	szUseHintString	const char*				
+1504	dropHintString	const char*				
+1508	iUseHintStringIndex	int	2952	1.0	3300	1.0
+1512	dropHintStringIndex	int	2956	1.0	3304	1.0
+1516	horizViewJitter	float	2960	0.98	3308	1.0
+1520	vertViewJitter	float	2964	0.98	3312	1.0
+1524	scanSpeed	float	2968	0.99	3316	1.0
+1528	scanAccel	float	2972	0.99	3320	1.0
+1532	scanPauseTime	int	2976	1.0	3324	1.0
+1536	szScript	const char*				
+1540	fOOPosAnimLength	float[2]				
+1548	minDamage	int				
+1552	minPlayerDamage	int				
+1556	fMaxDamageRange	float	3020	0.7	3368	0.73
+1560	fMinDamageRange	float	3040	0.72	3388	0.76
+1564	destabilizationRateTime	float	3044	0.99	3392	1.0
+1568	destabilizationCurvatureMax	float				
+1572	destabilizeDistance	int				
+1576	locationDamageMultipliers	float*				
+1580	fireRumble	const char*				
+1584	meleeImpactRumble	const char*				
+1588	tracerType	TracerDef*				
+1592	turretScopeZoomRate	float	3156	0.99	3508	1.0
+1596	turretScopeZoomMin	float	3160	0.99	3512	1.0
+1600	turretScopeZoomMax	float	3164	0.99	3516	1.0
+1604	turretOverheatUpRate	float	3168	1.0	3520	1.0
+1608	turretOverheatDownRate	float	3172	1.0	3524	1.0
+1612	turretOverheatPenalty	float	3176	1.0	3528	1.0
+1616	turretOverheatSound	snd_alias_list_t*	3180	0.99	3532	1.0
+1620	turretOverheatEffect	void*	3184	0.98	3536	0.99
+1624	turretBarrelSpinRumble	const char*				
+1628	turretBarrelSpinSpeed	float	3192	1.0	3544	1.0
+1632	turretBarrelSpinUpTime	float	3196	0.99	3548	1.0
+1636	turretBarrelSpinDownTime	float	3200	1.0	3552	1.0
+1640	turretBarrelSpinMaxSnd	snd_alias_list_t*	3204	0.99	3556	1.0
+1644	turretBarrelSpinUpSnd	snd_alias_list_t*[4]	3208	0.99	3560	1.0
+1660	turretBarrelSpinDownSnd	snd_alias_list_t*[4]	3224	0.99	3576	1.0
+1676	missileConeSoundAlias	snd_alias_list_t*	3240	1.0	3592	0.99
+1680	missileConeSoundAliasAtBase	snd_alias_list_t*	3244	1.0	3596	0.99
+1684	missileConeSoundRadiusAtTop	float	3248	1.0	3600	1.0
+1688	missileConeSoundRadiusAtBase	float	3252	1.0	3604	1.0
+1692	missileConeSoundHeight	float	3256	1.0	3608	1.0
+1696	missileConeSoundOriginOffset	float	3260	1.0	3612	1.0
+1700	missileConeSoundVolumescaleAtCore	float	3264	1.0	3616	1.0
+1704	missileConeSoundVolumescaleAtEdge	float	3268	1.0	3620	1.0
+1708	missileConeSoundVolumescaleCoreSize	float	3272	1.0	3624	1.0
+1712	missileConeSoundPitchAtTop	float	3276	1.0	3628	1.0
+1716	missileConeSoundPitchAtBottom	float	3280	1.0	3632	1.0
+1720	missileConeSoundPitchTopSize	float	3396	0.96	3756	0.95
+1724	missileConeSoundPitchBottomSize	float	3412	1.0	3772	1.0
+1728	missileConeSoundCrossfadeTopSize	float	3416	1.0	3776	1.0
+1732	missileConeSoundCrossfadeBottomSize	float	3432	0.93	3792	1.0
+1736	sharedAmmo	bool	3436	0.92	3796	1.0
+1737	lockonSupported	bool	3436	0.92	3796	1.0
+1738	requireLockonToFire	bool	3436	0.92	3796	1.0
+1739	bigExplosion	bool	3436	0.92	3796	1.0
+1740	noAdsWhenMagEmpty	bool				
+1741	avoidDropCleanup	bool				
+1742	inheritsPerks	bool				
+1743	crosshairColorChange	bool				
+1744	bRifleBullet	bool				
+1745	armorPiercing	bool				
+1746	bBoltAction	bool				
+1747	aimDownSight	bool				
+1748	bRechamberWhileAds	bool	3448	0.67		
+1749	bBulletExplosiveDamage	bool	3448	0.67		
+1750	bCookOffHold	bool	3448	0.67		
+1751	bClipOnly	bool	3448	0.67		
+1752	noAmmoPickup	bool	3452	0.99	3816	0.92
+1753	adsFireOnly	bool	3452	0.99	3816	0.92
+1754	cancelAutoHolsterWhenEmpty	bool	3452	0.99	3816	0.92
+1755	disableSwitchToWhenEmpty	bool	3452	0.99	3816	0.92
+1756	suppressAmmoReserveDisplay	bool				
+1757	laserSightDuringNightvision	bool				
+1758	markableViewmodel	bool				
+1759	noDualWield	bool				
+1760	flipKillIcon	bool	3460	0.97		
+1761	bNoPartialReload	bool	3460	0.97		
+1762	bSegmentedReload	bool	3460	0.97		
+1763	blocksProne	bool	3460	0.97		
+1764	silenced	bool				
+1765	isRollingGrenade	bool				
+1766	projExplosionEffectForceNormalUp	bool				
+1767	bProjImpactExplode	bool				
+1768	stickToPlayers	bool				
+1769	hasDetonator	bool				
+1770	disableFiring	bool				
+1771	timedDetonation	bool				
+1772	rotate	bool	3488	0.95	3852	1.0
+1773	holdButtonToThrow	bool	3488	0.95	3852	1.0
+1774	freezeMovementWhenFiring	bool	3488	0.95	3852	1.0
+1775	thermalScope	bool	3488	0.95	3852	1.0
+1776	altModeSameWeapon	bool	3616	0.95	4116	0.96
+1777	turretBarrelSpinEnabled	bool	3616	0.95	4116	0.96
+1778	missileConeSoundEnabled	bool	3616	0.95	4116	0.96
+1779	missileConeSoundPitchshiftEnabled	bool	3616	0.95	4116	0.96
+1780	missileConeSoundCrossfadeEnabled	bool	3620	0.93	4120	0.96
+1781	offhandHoldIsCancelable	bool	3620	0.93	4120	0.96

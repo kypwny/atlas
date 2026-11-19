@@ -1,0 +1,34 @@
+//! CoDOL asset browser: readers for the game's image format plus the UI.
+
+pub mod anim;
+pub mod app;
+pub mod bc;
+pub mod config;
+pub mod convert;
+pub mod data;
+pub mod dds;
+pub mod export;
+pub mod gameinfo;
+pub mod ifs;
+pub mod ifs_cache;
+pub mod iwd;
+pub mod iwdtool;
+pub mod ipak;
+pub mod iwi;
+pub mod kapi;
+pub mod log;
+pub mod lzo;
+pub mod model;
+pub mod modelindex;
+pub mod modelsource;
+pub mod modeltex;
+pub mod modeltab;
+pub mod oodle;
+pub mod pose;
+pub mod settings;
+pub mod source;
+pub mod viewer;
+pub mod wavelet;
+pub mod zone;
+pub mod zonefiles;
+mod wavelet_tables;

@@ -1,0 +1,14 @@
+/target/
+/.local/
+*.iwi
+*.iwd
+*.ifs
+*.ff
+*.png
+!/docs/**/*.png
+/tools/ifs_helper/target/
+!/assets/logo/*.png
+
+dist/
+__pycache__/
+*.pyc

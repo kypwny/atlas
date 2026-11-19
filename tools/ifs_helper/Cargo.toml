@@ -1,0 +1,11 @@
+[package]
+name = "ifs-helper"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "32-bit helper that reads Call of Duty Online .ifs archives through the game's own IFS2.dll"
+
+[dependencies]
+sha2 = "0.10"
+
+[workspace]
