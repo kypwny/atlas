@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "GPL-3.0-only"
-description = "Asset browser for Call of Duty Online (IWI images first)"
+description = "Call of Duty asset tool: open fastfiles, export models and maps to Cast for Blender, edit zones"
 
 [build-dependencies]
 winresource = "0.1"
