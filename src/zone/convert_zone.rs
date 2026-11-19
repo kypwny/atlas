@@ -502,7 +502,7 @@ pub fn convert_file(path: &Path) -> Result<Converted> {
 }
 
 /// A container to seal with: the smallest QA zone of the game folder (any will do; the key and IV are reused).
-fn template_container(root: &Path, key: &ArchiveKey) -> Result<Container> {
+pub fn template_container(root: &Path, key: &ArchiveKey) -> Result<Container> {
     let mut zones = super::export::zone_files(root);
     zones.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(u64::MAX));
     for p in zones {
