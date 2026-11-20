@@ -188,3 +188,28 @@ pub const ASSET_NAMES: [&str; 48] = [
 pub fn asset_type_name(ty: u32) -> &'static str {
     ASSET_NAMES.get(ty as usize).copied().unwrap_or("?")
 }
+
+/// `atlas --nx1info FILE...`: the container of NX1 fastfiles and the number of assets of each type.
+pub fn command(args: &[String]) -> Result<()> {
+    if args.is_empty() {
+        bail!("usage: atlas --nx1info FILE.ff...");
+    }
+    for path in args {
+        let raw = std::fs::read(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+        let f = open(&raw)?;
+        let (size, external, blocks) = f.xfile();
+        println!("{path}: {} version {}, image {} bytes (size field {size}, external {external}), blocks {:?}", if f.signed { "signed" } else { "unsigned" }, f.version, f.image.len(), blocks);
+        let chunks: usize = f.lanes.iter().map(|l| l.len()).sum();
+        println!("  texture chunks: {chunks} in lanes of {:?}", f.lanes.iter().map(|l| l.len()).collect::<Vec<_>>());
+        let list = asset_list(&f.image)?;
+        let mut by_type = std::collections::BTreeMap::new();
+        for (t, _) in &list.entries {
+            *by_type.entry(*t).or_insert(0usize) += 1;
+        }
+        println!("  {} script strings, {} assets", list.strings.len(), list.entries.len());
+        for (t, n) in by_type {
+            println!("    {n:6} {t:2} {}", asset_type_name(t));
+        }
+    }
+    Ok(())
+}
