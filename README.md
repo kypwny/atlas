@@ -16,8 +16,10 @@ Open Call of Duty fastfiles, export models and maps to [Cast](https://github.com
 
 ## What it does
 
-- Browse images (IWI), models, animations and maps.
-- Export models and animations to Cast for Blender, or to glTF, OBJ, SEModel and SEAnim.
+- Browse images (IWI), materials, sounds, models, animations and maps.
+- Export images as PNG, TGA, TIFF or DDS, with normal maps repaired for OpenGL or DirectX.
+- Play and export the loaded sounds of Call of Duty 4, Modern Warfare 2 and Modern Warfare 3 zones as WAV, no game running.
+- Export models and animations to Cast for Blender, or to glTF, OBJ, SEModel and SEAnim, in the unit you pick, with animations baked to a key per frame if you want.
 - Dump string tables, localize strings and raw files to CSV and JSON.
 - Unpack a zone to files, edit them, build it again (Call of Duty Online, Black Ops II).
 - Convert zones between Call of Duty 4, Modern Warfare 2, Modern Warfare 3 and Call of Duty Online (`--convertzone SRC.ff --to GAME`).
@@ -74,11 +76,23 @@ atlas --buildindex GAME_FOLDER index.tsv
 atlas --exportmodel GAME_FOLDER viewmodel_ak47 OUT_DIR --index index.tsv --format cast --anim "viewmodel_ak47_*"
 ```
 
+`--unit inches|cm|m` and `--scale S` pick the unit of the positions, `--bake` keys every frame. In the Models tab the same are next to the formats.
+
 Black Ops II writes each animation as its own `xanim/<name>.cast`. Import the model first, then the animations with the armature selected:
 
 ```text
 atlas --t6export ZONE.ff OUT_DIR --format cast --anims "pb_stand_*" --images --ipak IPAK_DIR
 ```
+
+### Sounds
+
+Sounds tab, pick a zone, click a sound to play it. Space plays or stops, Up and Down audition, E exports, Ctrl+C copies the name. Search takes `length:>2`, `rate:44100`, `channels:2`, `!word`.
+
+```text
+atlas --exportsound GAME_FOLDER|ZONE.ff OUT_DIR [--filter "length:>1 !amb"]
+```
+
+Sounds come from the zone files, not from a running game. Streamed sounds (`.iwd`) and Black Ops II sound banks are not read yet. PCM and Microsoft/IMA ADPCM play and export as WAV; other codecs export as the bare data.
 
 ### Look at a map
 

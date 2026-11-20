@@ -258,6 +258,65 @@ pub fn from_animation(anim: &crate::anim::Animation, model: Option<&super::Expor
     out
 }
 
+fn slerp(a: [f32; 4], mut b: [f32; 4], t: f32) -> [f32; 4] {
+    let mut dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    if dot < 0.0 {
+        dot = -dot;
+        b = b.map(|c| -c);
+    }
+    let (wa, wb) = if dot > 0.9995 {
+        (1.0 - t, t)
+    } else {
+        let theta = dot.clamp(-1.0, 1.0).acos();
+        let sin = theta.sin();
+        (((1.0 - t) * theta).sin() / sin, (t * theta).sin() / sin)
+    };
+    let q = [0, 1, 2, 3].map(|i| a[i] * wa + b[i] * wb);
+    let len = q.iter().map(|c| c * c).sum::<f32>().sqrt().max(1e-12);
+    q.map(|c| c / len)
+}
+
+/// Gives every track a key on every frame (rotations interpolated spherically, locations linearly; the first and last keys are
+/// held outside their range), for programs that do not interpolate between sparse keys.
+pub fn bake(anim: &mut SeAnim) {
+    let frames = anim.frame_count.max(1);
+    for b in &mut anim.bones {
+        if b.rotation.len() >= 1 && (b.rotation.len() > 1 || b.rotation[0].0 != 0 || frames > 1) {
+            let keys = std::mem::take(&mut b.rotation);
+            b.rotation = (0..frames)
+                .map(|f| {
+                    let next = keys.partition_point(|k| k.0 <= f);
+                    let q = match (next.checked_sub(1).map(|i| keys[i]), keys.get(next)) {
+                        (Some(a), Some(c)) if a.0 != f => slerp(a.1, c.1, (f - a.0) as f32 / (c.0 - a.0) as f32),
+                        (Some(a), _) => a.1,
+                        (None, Some(c)) => c.1,
+                        (None, None) => [0.0, 0.0, 0.0, 1.0],
+                    };
+                    (f, q)
+                })
+                .collect();
+        }
+        if !b.location.is_empty() {
+            let keys = std::mem::take(&mut b.location);
+            b.location = (0..frames)
+                .map(|f| {
+                    let next = keys.partition_point(|k| k.0 <= f);
+                    let v = match (next.checked_sub(1).map(|i| keys[i]), keys.get(next)) {
+                        (Some(a), Some(c)) if a.0 != f => {
+                            let t = (f - a.0) as f32 / (c.0 - a.0) as f32;
+                            [0, 1, 2].map(|i| a.1[i] + (c.1[i] - a.1[i]) * t)
+                        }
+                        (Some(a), _) => a.1,
+                        (None, Some(c)) => c.1,
+                        (None, None) => [0.0; 3],
+                    };
+                    (f, v)
+                })
+                .collect();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +334,23 @@ mod tests {
             modifiers: vec![(1, 2)],
             notes: vec![(3, "end".into())],
         }
+    }
+
+    #[test]
+    fn baking_keys_every_frame_and_interpolates() {
+        let mut a = sample();
+        bake(&mut a);
+        assert_eq!(a.bones[0].location.len(), 5);
+        assert_eq!(a.bones[0].location[2], (2, [2.5, 3.5, 4.5]));
+        assert_eq!(a.bones[0].rotation.len(), 5);
+        // a bone with one key at frame 2 holds it on every frame
+        assert_eq!(a.bones[1].rotation.len(), 5);
+        assert!(a.bones[1].rotation.iter().all(|k| k.1 == [0.0, 0.0, 1.0, 0.0]));
+        // a half-way rotation between identity and a quarter turn about z is an eighth turn
+        let mut b = SeAnim { frame_count: 3, bones: vec![BoneKeys { name: "x".into(), rotation: vec![(0, [0.0, 0.0, 0.0, 1.0]), (2, [0.0, 0.0, 0.70710677, 0.70710677])], ..Default::default() }], ..Default::default() };
+        bake(&mut b);
+        let m = b.bones[0].rotation[1].1;
+        assert!((m[2] - 0.38268343).abs() < 1e-4 && (m[3] - 0.9238795).abs() < 1e-4, "{m:?}");
     }
 
     #[test]

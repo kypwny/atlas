@@ -23,7 +23,7 @@ usage:
   atlas --packiwd OUT.iwd INPUT...        pack folders (paths relative to each), files, or archives into an IWD; .dds become images/*.iwi
   atlas --verifyiwd FILE.iwd              read every entry back (CRC) and check the .iwi headers
   atlas --ipak FILE.ipak [INDEX OUT.iwi]   check a Black Ops II IPAK, or extract entry INDEX
-  atlas --exportmodel GAME_FOLDER NAME OUT_DIR --index MODEL_INDEX.tsv [--format glb,obj,xe,se,sa,cast] [--scale S] [--no-images] [--anim NAME,PREFIX*]
+  atlas --exportmodel GAME_FOLDER NAME OUT_DIR --index MODEL_INDEX.tsv [--format glb,obj,xe,se,sa,cast] [--unit inches|cm|m] [--scale S] [--bake] [--no-images] [--anim NAME,PREFIX*]
                                                       export a model (an xmodel name, or a streamed file name) with its skeleton, skin weights,
                                                       materials and textures; --format picks glTF (glb), OBJ+MTL, XMODEL_EXPORT (xe), SEModel (se), SEAnim (sa); --anim adds animations (to the glb and as xanim/*.seanim)
   atlas --buildanims GAME_FOLDER OUT.tsv [NAME_FILTER]   replay the zones and write the animation index (anim lines)
@@ -57,6 +57,7 @@ usage:
                                                       Start the map with devmap MAP (or map MAP)
   atlas --zonewalk iw3|iw4|iw5|t6|nx1 FILE|FOLDER [-v] [--dump DIR]   walk the assets of Call of Duty 4, MW2, MW3 or Black Ops II zones (--t6walk = t6)
   atlas --nx1info FILE.ff...   the container of Future Warfare (NX1) Xbox 360 fastfiles and their assets by type
+  atlas --exportsound GAME_FOLDER|ZONE.ff OUT_DIR [--filter TEXT]   the loaded sounds of Call of Duty 4, Modern Warfare 2 and 3 zones as WAV (search words: length:>2 rate:44100 !name)
   atlas --t6export ZONE.ff|FOLDER OUT_DIR [--format cast|obj] [--lod N] [--name FILTER]   export every xmodel of a Black Ops II zone (LOD 0 by default)
   atlas --t6unzone ZONE.ff OUT_DIR        a Black Ops II zone as files: raw files, script trees, localize entries, string tables (CSV)
   atlas --t6buildzone DIR OUT.ff [--keep-signature]   builds the zone from those files: changed files replace their asset, deleted files and rows remove it;
@@ -247,6 +248,31 @@ fn main() -> Result<()> {
                 out.display(),
                 t.elapsed().as_secs_f32()
             );
+            Ok(())
+        }
+        Some("--exportsound") => {
+            // atlas --exportsound GAME_FOLDER|ZONE.ff OUT_DIR [--filter TEXT]: the loaded sounds of Call of Duty 4, Modern Warfare 2 and Modern Warfare 3 zones as WAV
+            let (input, out) = (path_arg(&args, 1)?, path_arg(&args, 2)?);
+            let filter = args.iter().position(|a| a == "--filter").and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+            let t = Instant::now();
+            let files = if input.is_file() { vec![input.clone()] } else { zone::export::survey_files(&input) };
+            let q = atlas::query::Query::parse(&filter, atlas::sound::PROPERTIES);
+            let (mut zones, mut written, mut skipped) = (0usize, 0usize, 0usize);
+            for f in files {
+                if zone::fastfile::peek(&f).ok().and_then(|p| atlas::sound::game_of(&p)).is_none() {
+                    continue;
+                }
+                match atlas::sound::read_zone(&f) {
+                    Ok(list) => {
+                        zones += 1;
+                        let keep: Vec<&atlas::sound::Sound> = list.iter().filter(|s| q.matches(&s.name.to_lowercase(), |p| atlas::sound::property(s, p))).collect();
+                        skipped += list.len() - keep.len();
+                        written += atlas::sound::write_all(&keep, &out)?;
+                    }
+                    Err(e) => eprintln!("{}: {e:#}", f.display()),
+                }
+            }
+            println!("{zones} zones, {written} sounds -> {} ({skipped} filtered out, {:.1}s)", out.display(), t.elapsed().as_secs_f32());
             Ok(())
         }
         Some("--t6info") => {
@@ -510,6 +536,8 @@ fn exportmodel(args: &[String]) -> Result<()> {
         match a.as_str() {
             "--index" => index_path = it.next().map(PathBuf::from),
             "--scale" => opts.scale = it.next().context("--scale needs a number")?.parse()?,
+            "--unit" => opts.unit = export::Unit::from_code(it.next().context("--unit needs inches, cm or m")?).context("unknown unit (inches, cm, m)")?,
+            "--bake" => opts.bake = true,
             "--no-images" => opts.images = false,
             "--anim" => anim_names = it.next().context("--anim needs names")?.split(',').map(str::to_string).collect(),
             "--format" => {

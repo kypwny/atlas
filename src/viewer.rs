@@ -1121,3 +1121,69 @@ pub fn viewport_rect(ui: &mut egui::Ui) -> (egui::Response, (u32, u32)) {
     let ppp = ui.ctx().pixels_per_point();
     (resp, ((rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32))
 }
+
+/// How the mouse moves the camera in the viewers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CameraStyle {
+    /// Drag rotates, right or middle drag pans, wheel zooms.
+    #[default]
+    Default,
+    /// Alt with the left button rotates, with the middle one pans, with the right one zooms.
+    Maya,
+    /// The middle button rotates, with Shift pans, with Ctrl zooms.
+    Blender,
+}
+
+impl CameraStyle {
+    pub const ALL: [(CameraStyle, &'static str); 3] = [(CameraStyle::Default, "Atlas"), (CameraStyle::Maya, "Maya"), (CameraStyle::Blender, "Blender")];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            CameraStyle::Default => "atlas",
+            CameraStyle::Maya => "maya",
+            CameraStyle::Blender => "blender",
+        }
+    }
+
+    pub fn from_code(s: &str) -> Option<Self> {
+        Some(match s {
+            "atlas" => CameraStyle::Default,
+            "maya" => CameraStyle::Maya,
+            "blender" => CameraStyle::Blender,
+            _ => return None,
+        })
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            CameraStyle::Default => "drag: rotate · right-drag: pan · wheel: zoom",
+            CameraStyle::Maya => "Alt+left: rotate · Alt+middle: pan · Alt+right: zoom · wheel: zoom",
+            CameraStyle::Blender => "middle: rotate · Shift+middle: pan · Ctrl+middle: zoom · wheel: zoom",
+        }
+    }
+}
+
+/// Applies the mouse input of a viewport to the camera in the chosen style. `fine` scales every movement (1.0 for none).
+pub fn camera_input(ui: &egui::Ui, resp: &egui::Response, height: f32, cam: &mut Camera, style: CameraStyle, fine: f32) {
+    use egui::PointerButton::{Middle, Primary, Secondary};
+    let m = ui.input(|i| i.modifiers);
+    let d = resp.drag_delta() * fine;
+    let (rotate, pan, zoom) = match style {
+        CameraStyle::Default => (resp.dragged_by(Primary), resp.dragged_by(Secondary) || resp.dragged_by(Middle), false),
+        CameraStyle::Maya => (m.alt && resp.dragged_by(Primary), m.alt && resp.dragged_by(Middle), m.alt && resp.dragged_by(Secondary)),
+        CameraStyle::Blender => (resp.dragged_by(Middle) && !m.shift && !m.ctrl, resp.dragged_by(Middle) && m.shift, resp.dragged_by(Middle) && m.ctrl && !m.shift),
+    };
+    if rotate {
+        cam.orbit(d.x, d.y);
+    } else if pan {
+        cam.pan(d.x, d.y, height);
+    } else if zoom {
+        cam.zoom((d.x - d.y) * 2.0);
+    }
+    if resp.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y) * fine;
+        if scroll != 0.0 {
+            cam.zoom(scroll);
+        }
+    }
+}

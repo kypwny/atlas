@@ -67,3 +67,14 @@ compiles from **Jekyll** dumps; no code from either was used.
 
 The program contains no game assets. Files read from your installation remain the property
 of their owners. Not affiliated with Tencent, Activision or Treyarch.
+- The Sounds tab, the search words, the image export options (formats, normal map repair), the material export, the model unit
+  and bake options, the per-asset export marks and the Maya and Blender camera controls follow the feature set of **Saluki**
+  by echo000 and dest1yo (https://github.com/echo000/saluki-releases), read from its README and usage guide only. Its loaded
+  sound structures (the Modern Warfare sound record with its rate, bits, channels and data length) and the WAV, FLAC and
+  Microsoft ADPCM header values were cross-checked against **Greyhound** and **WraithXArchon** (Scobalula and DTZxPorter,
+  https://github.com/Scobalula/Greyhound, https://github.com/dtzxporter/WraithXArchon, both GPL-3.0). `src/sound.rs` reads the
+  same records from the zone files through the schema walker and is our own code; the decoders for Microsoft and IMA ADPCM are
+  written from the public formats. The Black Ops II sound bank layout (not read yet) was described by **Black Ops II Sound Studio**
+  by master131 (https://github.com/master131/Black-Ops-II-Sound-Studio, MIT) and harmony by g-rl (https://github.com/g-rl/harmony,
+  no licence stated: read only, no code taken).
+

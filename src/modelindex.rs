@@ -351,6 +351,13 @@ impl ModelIndex {
         self.materials.get(&name.to_ascii_lowercase())
     }
 
+    /// Every material, by name.
+    pub fn materials(&self) -> Vec<&Material> {
+        let mut v: Vec<&Material> = self.materials.values().collect();
+        v.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+        v
+    }
+
     pub fn material_count(&self) -> usize {
         self.materials.len()
     }

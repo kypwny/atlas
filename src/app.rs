@@ -11,6 +11,7 @@ use eframe::egui::{self, Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, 
 use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew, wgpu};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use crate::query::Query;
 use crate::settings::{GridBackground, Settings};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -18,6 +19,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 mod datatab;
 mod extras;
 mod mapview;
+mod materialtab;
+mod soundtab;
 mod workflow;
 
 /// Opens the folder holding `path` in the file manager (selecting the file).
@@ -319,6 +322,8 @@ enum Tab {
     Images,
     Models,
     Maps,
+    Materials,
+    Sounds,
     Data,
 }
 
@@ -363,6 +368,8 @@ struct App {
     game_cache: workflow::KnownGames,
     maps: workflow::MapsState,
     data: datatab::DataState,
+    sounds: soundtab::SoundState,
+    materials: materialtab::MaterialState,
     mapview: mapview::MapView,
     /// `ATLAS_MAP=<zone file name>`: open that zone's map when the Maps tab has its list (for screenshots).
     pending_map: Option<String>,
@@ -373,7 +380,9 @@ struct App {
     ui_demo: bool,
     save_search_name: String,
     batch_message: Option<String>,
-    batch_rx: Option<Receiver<String>>,
+    batch_rx: Option<Receiver<(String, Vec<(String, bool)>)>>,
+    /// What the last exports did to each image, by name: written (true) or failed (false).
+    image_marks: HashMap<String, bool>,
 }
 
 fn config_file() -> Option<PathBuf> {
@@ -429,6 +438,8 @@ impl App {
             game_cache: Default::default(),
             maps: Default::default(),
             data: Default::default(),
+            sounds: Default::default(),
+            materials: Default::default(),
             mapview: Default::default(),
             pending_map: crate::config::env_var("MAP").ok(),
             batch_dir: None,
@@ -437,6 +448,7 @@ impl App {
             save_search_name: String::new(),
             batch_message: None,
             batch_rx: None,
+            image_marks: HashMap::new(),
         };
         // settings: a test capture uses the defaults (and `ATLAS_UI` can ask for a look), the user's own run reads the file
         if app.capture.is_none() {
@@ -458,6 +470,8 @@ impl App {
                     "log" => app.log_open = true,
                     "maps" => app.tab = Tab::Maps,
                     "data" => app.tab = Tab::Data,
+                    "sounds" => app.tab = Tab::Sounds,
+                    "materials" => app.tab = Tab::Materials,
                     _ => {}
                 }
             }
@@ -561,13 +575,25 @@ impl App {
             return;
         }
         let f = &self.filters;
-        let words: Vec<String> = f.text.split_whitespace().map(str::to_lowercase).collect();
+        let q = Query::parse(&f.text, &["width", "height", "mips", "size", "depth"]);
         self.visible = cat
             .entries
             .iter()
             .enumerate()
             .filter(|(_, e)| {
-                if !words.iter().all(|w| e.name.contains(w.as_str())) {
+                let size = e.variants.iter().map(|v| v.size).max().unwrap_or(0) as f64;
+                let prop = |p: &str| -> Option<f64> {
+                    let h = e.header()?;
+                    match p {
+                        "width" => Some(h.width as f64),
+                        "height" => Some(h.height as f64),
+                        "depth" => Some(h.depth as f64),
+                        "mips" => Some(h.mip_count() as f64),
+                        "size" => Some(size),
+                        _ => None,
+                    }
+                };
+                if !q.matches(&e.name, prop) {
                     return false;
                 }
                 if f.dupes && e.variants.len() < 2 {
@@ -705,6 +731,8 @@ impl App {
             ui.selectable_value(&mut self.tab, Tab::Images, "Images");
             ui.selectable_value(&mut self.tab, Tab::Models, "Models");
             ui.selectable_value(&mut self.tab, Tab::Maps, "Maps");
+            ui.selectable_value(&mut self.tab, Tab::Materials, "Materials");
+            ui.selectable_value(&mut self.tab, Tab::Sounds, "Sounds");
             ui.selectable_value(&mut self.tab, Tab::Data, "Data");
             ui.separator();
             if ui.button("Open game folder…").clicked() {
@@ -915,6 +943,16 @@ This version's layout is not yet checked against real files here." }
                                 }
                             }
                         }
+                        if let Some(&ok) = self.image_marks.get(&entry.name) {
+                            let at = Pos2::new(img_rect.min.x + 9.0, img_rect.max.y - 9.0);
+                            painter.circle_filled(at, 5.0, Color32::from_black_alpha(150));
+                            painter.circle_filled(at, 3.5, if ok { Color32::from_rgb(90, 200, 120) } else { Color32::from_rgb(230, 90, 90) });
+                            if resp.hovered() && ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.distance(at) < 8.0) {
+                                egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), resp.id.with("mark"), egui::PopupAnchor::Pointer).show(|ui| {
+                                    ui.label(if ok { "Exported" } else { "Export failed" });
+                                });
+                            }
+                        }
                         let label = if entry.variants.len() > 1 { format!("{} ×{}", entry.name, entry.variants.len()) } else { entry.name.clone() };
                         let galley = painter.layout(label, egui::FontId::proportional(11.5), ui.visuals().text_color(), cell_w - 8.0);
                         painter.galley(Pos2::new(rect.min.x + 5.0, img_rect.max.y + 4.0), galley, ui.visuals().text_color());
@@ -1058,7 +1096,7 @@ This version's layout is not yet checked against real files here." }
                 }
             });
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(self.preview.level.is_some(), egui::Button::new("Export PNG…")).clicked() {
+                if ui.add_enabled(self.preview.level.is_some(), egui::Button::new(format!("Export {}…", self.settings.image_format.label()))).clicked() {
                     self.export_png(&entry.name, false);
                 }
                 if h.face_count() > 1 && ui.add_enabled(self.preview.level.is_some(), egui::Button::new("Export 6 faces…")).clicked() {
@@ -1103,14 +1141,18 @@ This version's layout is not yet checked against real files here." }
 
     fn export_png(&mut self, name: &str, all_faces: bool) {
         let Some(l) = &self.preview.level else { return };
+        let (format, fix) = (self.settings.image_format, self.settings.normal_fix);
+        let normal = self.catalog.as_ref().and_then(|c| self.selected.map(|i| c.entries[i].header())).flatten().map_or(false, |h| crate::imgexport::looks_like_normal_map(name, h.is_normal_map()))
+            || crate::imgexport::looks_like_normal_map(name, false);
+        let ext = format.extension();
         let result: Result<()> = (|| {
             if all_faces {
                 let Some(dir) = rfd::FileDialog::new().set_title("Folder for the six faces").pick_folder() else { return Ok(()) };
-                for (i, f) in l.faces.iter().enumerate() {
-                    image::save_buffer(dir.join(format!("{name}_face{i}.png")), f, l.width, l.height, image::ColorType::Rgba8)?;
+                for i in 0..l.faces.len() {
+                    crate::imgexport::write_face(&dir.join(format!("{name}_face{i}.{ext}")), l, i, format, normal, fix)?;
                 }
-            } else if let Some(path) = rfd::FileDialog::new().set_file_name(format!("{name}.png")).add_filter("PNG", &["png"]).save_file() {
-                image::save_buffer(path, &l.faces[self.preview.face], l.width, l.height, image::ColorType::Rgba8)?;
+            } else if let Some(path) = rfd::FileDialog::new().set_file_name(format!("{name}.{ext}")).add_filter(format.label(), &[ext]).save_file() {
+                crate::imgexport::write_face(&path, l, self.preview.face, format, normal, fix)?;
             }
             Ok(())
         })();
@@ -1225,6 +1267,8 @@ impl App {
             self.scan.is_some() || self.mapview.is_busy()
         } else if self.tab == Tab::Data {
             self.data.rx.is_some()
+        } else if self.tab == Tab::Sounds {
+            self.sounds.is_busy()
         } else {
             self.preview.loading || self.queue.state.lock().unwrap().inflight.len() > 0 || self.thumbs.len() < self.visible.len().min(12)
         };
@@ -1389,6 +1433,7 @@ impl eframe::App for App {
                 egui::CentralPanel::default().show(ui, |ui| self.grid(ui));
             }
             Tab::Models => {
+                self.models.camera_style = self.settings.camera_style;
                 let state = self.wgpu_state.clone();
                 self.models.ui(ui, state.as_ref());
             }
@@ -1399,6 +1444,12 @@ impl eframe::App for App {
                 } else {
                     egui::CentralPanel::default().show(ui, |ui| self.maps_ui(ui));
                 }
+            }
+            Tab::Materials => {
+                egui::CentralPanel::default().show(ui, |ui| self.materials_ui(ui));
+            }
+            Tab::Sounds => {
+                egui::CentralPanel::default().show(ui, |ui| self.sounds_ui(ui));
             }
             Tab::Data => {
                 egui::CentralPanel::default().show(ui, |ui| self.data_ui(ui));

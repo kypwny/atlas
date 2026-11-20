@@ -184,11 +184,75 @@ pub struct Options {
     pub images: bool,
     /// Multiplies positions; 1.0 keeps the game's inches. SEModel is always written in centimetres on top of this.
     pub scale: f32,
+    /// The unit the files are written in. `Default` keeps each format as it was (glTF, OBJ and XMODEL_EXPORT in the game's
+    /// inches, SEModel and Cast in centimetres) and `scale` multiplies that; any other unit makes every format use it, then
+    /// `scale` multiplies that.
+    pub unit: Unit,
+    /// Key every frame of each animation instead of the game's sparse keys.
+    pub bake: bool,
+}
+
+/// The unit of the exported positions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Unit {
+    #[default]
+    Default,
+    Inches,
+    Centimeters,
+    Meters,
+}
+
+impl Unit {
+    pub const ALL: [(Unit, &'static str); 4] = [(Unit::Default, "Each format's own"), (Unit::Inches, "Inches (game)"), (Unit::Centimeters, "Centimeters"), (Unit::Meters, "Meters")];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Unit::Default => "default",
+            Unit::Inches => "inches",
+            Unit::Centimeters => "cm",
+            Unit::Meters => "m",
+        }
+    }
+
+    pub fn from_code(s: &str) -> Option<Unit> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "default" | "auto" => Unit::Default,
+            "in" | "inch" | "inches" => Unit::Inches,
+            "cm" | "centimeter" | "centimeters" | "centimetre" | "centimetres" => Unit::Centimeters,
+            "m" | "meter" | "meters" | "metre" | "metres" => Unit::Meters,
+            _ => return None,
+        })
+    }
+
+    /// Game units (inches) to this unit.
+    fn per_inch(self) -> f32 {
+        match self {
+            Unit::Default | Unit::Inches => 1.0,
+            Unit::Centimeters => 2.54,
+            Unit::Meters => 0.0254,
+        }
+    }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { formats: Formats::default(), images: true, scale: 1.0 }
+        Options { formats: Formats::default(), images: true, scale: 1.0, unit: Unit::Default, bake: false }
+    }
+}
+
+impl Options {
+    /// The factor for the writers that take the game's inches (glTF, OBJ, XMODEL_EXPORT).
+    pub fn scale_inches(&self) -> f32 {
+        self.scale * self.unit.per_inch()
+    }
+
+    /// The factor for the writers that already convert inches to centimetres themselves (SEModel, SEAnim, Cast): they multiply
+    /// by 2.54, so the factor they are given is the wanted unit over centimetres.
+    pub fn scale_centimeters(&self) -> f32 {
+        match self.unit {
+            Unit::Default => self.scale,
+            u => self.scale * u.per_inch() / 2.54,
+        }
     }
 }
 
@@ -252,22 +316,31 @@ pub fn export(model: &ExportModel, dir: &std::path::Path, catalog: Option<&crate
         Ok(())
     };
     if opts.formats.glb {
-        put(format!("{base}.glb"), gltf::write_glb(model, opts.scale, &embedded, anims))?;
+        put(format!("{base}.glb"), gltf::write_glb(model, opts.scale_inches(), &embedded, anims))?;
     }
     if opts.formats.obj {
-        let (obj, mtl) = obj::write(model, &format!("{base}.mtl"), opts.scale);
+        let (obj, mtl) = obj::write(model, &format!("{base}.mtl"), opts.scale_inches());
         put(format!("{base}.obj"), obj.into_bytes())?;
         put(format!("{base}.mtl"), mtl.into_bytes())?;
     }
     if opts.formats.xmodel_export {
-        put(format!("{base}.XMODEL_EXPORT"), xmodel_export::write(model, opts.scale).into_bytes())?;
+        put(format!("{base}.XMODEL_EXPORT"), xmodel_export::write(model, opts.scale_inches()).into_bytes())?;
     }
     if opts.formats.semodel {
-        put(format!("{base}.semodel"), semodel::from_export(model, 2.54 * opts.scale).write())?;
+        put(format!("{base}.semodel"), semodel::from_export(model, 2.54 * opts.scale_centimeters()).write())?;
     }
     if opts.formats.cast {
-        let converted: Vec<seanim::SeAnim> = anims.iter().map(|a| seanim::from_animation(a, Some(model), 2.54 * opts.scale)).collect();
-        put(format!("{base}.cast"), cast::write(model, &converted, 2.54 * opts.scale))?;
+        let converted: Vec<seanim::SeAnim> = anims
+            .iter()
+            .map(|a| {
+                let mut c = seanim::from_animation(a, Some(model), 2.54 * opts.scale_centimeters());
+                if opts.bake {
+                    seanim::bake(&mut c);
+                }
+                c
+            })
+            .collect();
+        put(format!("{base}.cast"), cast::write(model, &converted, 2.54 * opts.scale_centimeters()))?;
     }
     drop(put);
     if opts.formats.seanim && !anims.is_empty() {
@@ -275,9 +348,31 @@ pub fn export(model: &ExportModel, dir: &std::path::Path, catalog: Option<&crate
         std::fs::create_dir_all(&adir)?;
         for a in anims {
             let p = adir.join(format!("{}.seanim", safe(&a.name)));
-            std::fs::write(&p, seanim::from_animation(a, Some(model), 2.54 * opts.scale).write())?;
+            let mut c = seanim::from_animation(a, Some(model), 2.54 * opts.scale_centimeters());
+            if opts.bake {
+                seanim::bake(&mut c);
+            }
+            std::fs::write(&p, c.write())?;
             written.push(p);
         }
     }
     Ok((written, missing))
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+
+    #[test]
+    fn units_give_the_same_size_in_every_writer() {
+        // a metre is 39.37 inches: the inch writers get 0.0254, the centimetre ones (which multiply by 2.54) get 0.01
+        let o = Options { unit: Unit::Meters, ..Default::default() };
+        assert!((o.scale_inches() - 0.0254).abs() < 1e-6);
+        assert!((2.54 * o.scale_centimeters() - 0.0254).abs() < 1e-6);
+        let o = Options { unit: Unit::Centimeters, scale: 2.0, ..Default::default() };
+        assert!((o.scale_inches() - 5.08).abs() < 1e-5 && (2.54 * o.scale_centimeters() - 5.08).abs() < 1e-5);
+        // the default keeps every format as it was
+        let o = Options::default();
+        assert_eq!((o.scale_inches(), o.scale_centimeters()), (1.0, 1.0));
+    }
 }

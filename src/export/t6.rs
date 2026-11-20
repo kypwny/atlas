@@ -172,11 +172,15 @@ pub struct T6Options {
     pub ipak_dir: Option<PathBuf>,
     /// Skip models (so only animations are written).
     pub no_models: bool,
+    /// The unit and the extra factor of the written positions, and whether animations get a key on every frame (see `Options`).
+    pub unit: super::Unit,
+    pub scale: f32,
+    pub bake: bool,
 }
 
 impl Default for T6Options {
     fn default() -> Self {
-        T6Options { formats: Formats { glb: false, obj: false, xmodel_export: false, semodel: false, cast: true, seanim: false }, lod: 0, filter: None, anims: None, images: false, ipak_dir: None, no_models: false }
+        T6Options { formats: Formats { glb: false, obj: false, xmodel_export: false, semodel: false, cast: true, seanim: false }, lod: 0, filter: None, anims: None, images: false, ipak_dir: None, no_models: false, unit: super::Unit::Default, scale: 1.0, bake: false }
     }
 }
 
@@ -242,7 +246,7 @@ pub fn export_zones_with(input: &Path, out_dir: &Path, o: &T6Options) -> Result<
     if files.is_empty() {
         bail!("no .ff files at {}", input.display());
     }
-    let opts = Options { formats: o.formats, images: false, scale: 1.0 };
+    let opts = Options { formats: o.formats, images: false, scale: o.scale, unit: o.unit, bake: o.bake };
     let mut sum = Summary::default();
     let mut seen = std::collections::HashSet::new();
     let mut seen_images = std::collections::HashSet::new();
@@ -354,7 +358,10 @@ pub fn export_zones_with(input: &Path, out_dir: &Path, o: &T6Options) -> Result<
                     }
                 };
                 std::fs::create_dir_all(&dir)?;
-                let mut se = super::seanim::from_animation(anim, None, 2.54 * opts.scale);
+                let mut se = super::seanim::from_animation(anim, None, 2.54 * opts.scale_centimeters());
+                if opts.bake {
+                    super::seanim::bake(&mut se);
+                }
                 let base = super::safe(&a.name);
                 if o.formats.cast {
                     // rotations are local to the parent bone (absolute), translations are offsets from the bind pose (checked by
@@ -381,7 +388,7 @@ pub fn export_zones_with(input: &Path, out_dir: &Path, o: &T6Options) -> Result<
 
 /// `atlas --t6export ZONE.ff|FOLDER OUT_DIR [--format cast|obj|sa] [--lod N] [--name FILTER] [--anims [FILTER]] [--images] [--ipak DIR] [--no-models]`
 pub fn command(args: &[String]) -> Result<()> {
-    const USAGE: &str = "usage: atlas --t6export ZONE.ff|FOLDER OUT_DIR [--format cast|obj|sa] [--lod N] [--name FILTER] [--anims [FILTER]] [--images] [--ipak DIR] [--no-models]";
+    const USAGE: &str = "usage: atlas --t6export ZONE.ff|FOLDER OUT_DIR [--format cast|obj|sa] [--lod N] [--name FILTER] [--anims [FILTER]] [--images] [--ipak DIR] [--no-models] [--unit inches|cm|m] [--scale S] [--bake]";
     let input = PathBuf::from(args.first().context(USAGE)?);
     let out = PathBuf::from(args.get(1).context("output folder missing")?);
     let mut o = T6Options::default();
@@ -405,6 +412,9 @@ pub fn command(args: &[String]) -> Result<()> {
             "--images" => o.images = true,
             "--ipak" => o.ipak_dir = it.next().map(PathBuf::from),
             "--no-models" => o.no_models = true,
+            "--scale" => o.scale = it.next().context("--scale needs a number")?.parse()?,
+            "--unit" => o.unit = super::Unit::from_code(it.next().context("--unit needs inches, cm or m")?).context("unknown unit (inches, cm, m)")?,
+            "--bake" => o.bake = true,
             other => bail!("unknown option {other}"),
         }
     }

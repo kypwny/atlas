@@ -46,7 +46,8 @@ pub(super) fn draw_star(painter: &egui::Painter, center: Pos2, r: f32, color: Co
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BatchKind {
-    Png,
+    /// PNG, TGA or TIFF, with the normal-map repair of the settings.
+    Image(crate::imgexport::ImageFormat, crate::imgexport::NormalFix),
     Dds,
     Iwi,
 }
@@ -57,13 +58,21 @@ struct BatchItem {
     key: String,
 }
 
-fn file_safe(name: &str) -> String {
+pub(super) fn file_safe(name: &str) -> String {
     name.chars().map(|c| if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() { '_' } else { c }).collect()
 }
 
 /// Writes every item into `dir` in the chosen form and returns a one-line summary.
+/// Like [`run_batch_marked`], for the summary alone.
+#[cfg(test)]
 fn run_batch(kind: BatchKind, items: Vec<BatchItem>, dir: PathBuf) -> String {
+    run_batch_marked(kind, items, dir).0
+}
+
+/// Writes every item into `dir` in the chosen form: a one-line summary, and per image whether it was written.
+fn run_batch_marked(kind: BatchKind, items: Vec<BatchItem>, dir: PathBuf) -> (String, Vec<(String, bool)>) {
     let (mut ok, mut failed, mut first_error) = (0usize, 0usize, String::new());
+    let mut marks = Vec::new();
     for it in items {
         let result: Result<()> = (|| {
             let data = it.provider.read(&it.key)?;
@@ -71,14 +80,16 @@ fn run_batch(kind: BatchKind, items: Vec<BatchItem>, dir: PathBuf) -> String {
             match kind {
                 BatchKind::Iwi => std::fs::write(dir.join(format!("{stem}.iwi")), &data)?,
                 BatchKind::Dds => std::fs::write(dir.join(format!("{stem}.dds")), convert::iwi_to_dds(&data)?)?,
-                BatchKind::Png => {
+                BatchKind::Image(format, fix) => {
                     let h = Header::parse(&data)?;
                     let l = iwi::decode_level(&data, &h, 0)?;
-                    image::save_buffer(dir.join(format!("{stem}.png")), &l.faces[0], l.width, l.height, image::ColorType::Rgba8)?;
+                    let normal = crate::imgexport::looks_like_normal_map(&it.name, h.is_normal_map());
+                    crate::imgexport::write_face(&dir.join(format!("{stem}.{}", format.extension())), &l, 0, format, normal, fix)?;
                 }
             }
             Ok(())
         })();
+        marks.push((it.name.clone(), result.is_ok()));
         match result {
             Ok(()) => ok += 1,
             Err(e) => {
@@ -89,7 +100,8 @@ fn run_batch(kind: BatchKind, items: Vec<BatchItem>, dir: PathBuf) -> String {
             }
         }
     }
-    if failed == 0 { format!("Wrote {ok} file(s) to {}", dir.display()) } else { format!("Wrote {ok} file(s) to {}, {failed} failed (first: {first_error})", dir.display()) }
+    let summary = if failed == 0 { format!("Wrote {ok} file(s) to {}", dir.display()) } else { format!("Wrote {ok} file(s) to {}, {failed} failed (first: {first_error})", dir.display()) };
+    (summary, marks)
 }
 
 impl App {
@@ -172,7 +184,7 @@ impl App {
         self.batch_message = Some(format!("Writing {} file(s) ...", items.len()));
         self.batch_dir = Some(dir.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(run_batch(kind, items, dir));
+            let _ = tx.send(run_batch_marked(kind, items, dir));
             ctx.request_repaint();
         });
         self.batch_rx = Some(rx);
@@ -180,8 +192,9 @@ impl App {
 
     pub(super) fn poll_batch(&mut self) {
         if let Some(rx) = &self.batch_rx {
-            if let Ok(m) = rx.try_recv() {
+            if let Ok((m, marks)) = rx.try_recv() {
                 crate::log::log(&m);
+                self.image_marks.extend(marks);
                 self.batch_message = Some(m);
                 self.batch_rx = None;
             }
@@ -201,8 +214,9 @@ impl App {
                     let entries: Vec<iwd::Entry> = set.iter().filter_map(|&i| self.pack_entry(cat, i, None)).collect();
                     self.iwd.add(entries);
                 }
-                if ui.button("Export PNG…").clicked() {
-                    self.start_batch(BatchKind::Png);
+                let (format, fix) = (self.settings.image_format, self.settings.normal_fix);
+                if ui.button(format!("Export {}…", format.label())).on_hover_text("The format and the normal map repair are in Settings").clicked() {
+                    self.start_batch(BatchKind::Image(format, fix));
                 }
                 if ui.button("Export DDS…").clicked() {
                     self.start_batch(BatchKind::Dds);
@@ -350,6 +364,28 @@ impl App {
                 }
             });
             ui.separator();
+            ui.strong("3D viewers");
+            ui.horizontal(|ui| {
+                ui.label("Camera controls");
+                for (c, name) in crate::viewer::CameraStyle::ALL {
+                    ui.selectable_value(&mut s.camera_style, c, name);
+                }
+            }).response.on_hover_text(s.camera_style.hint());
+            ui.separator();
+            ui.strong("Image export");
+            ui.horizontal(|ui| {
+                ui.label("Format");
+                for (f, name) in crate::imgexport::ImageFormat::ALL {
+                    ui.selectable_value(&mut s.image_format, f, name);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Normal maps");
+                for (f, name) in crate::imgexport::NormalFix::ALL {
+                    ui.selectable_value(&mut s.normal_fix, f, name);
+                }
+            }).response.on_hover_text("Rebuilds the blue channel from red and green. OpenGL for Blender and Maya, DirectX for Unreal and 3ds Max (green flipped)");
+            ui.separator();
             ui.strong("Data");
             ui.horizontal(|ui| {
                 ui.label(format!("{} favourites, {} saved searches, {} recent folders", s.favourites.len(), s.searches.len(), s.recent.len()));
@@ -414,7 +450,9 @@ impl App {
         let typing = ctx.memory(|m| m.focused()).is_some() && ctx.egui_wants_keyboard_input();
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
         if pressed(Modifiers::COMMAND, Key::F) {
-            self.tab = Tab::Images;
+            if !matches!(self.tab, Tab::Sounds | Tab::Materials) {
+                self.tab = Tab::Images;
+            }
             self.focus_search = true;
         }
         if pressed(Modifiers::COMMAND, Key::O) {
@@ -443,6 +481,19 @@ impl App {
         }
         if pressed(Modifiers::NONE, Key::F) {
             self.toggle_favourites();
+        }
+        if pressed(Modifiers::NONE, Key::E) && !self.batch_set().is_empty() {
+            let kind = BatchKind::Image(self.settings.image_format, self.settings.normal_fix);
+            self.start_batch(kind);
+        }
+        if pressed(Modifiers::COMMAND, Key::C) {
+            if let Some(cat) = self.catalog.clone() {
+                let names: Vec<String> = self.batch_set().iter().map(|&i| cat.entries[i].name.clone()).collect();
+                if !names.is_empty() {
+                    ctx.copy_text(names.join("
+"));
+                }
+            }
         }
         let mut step: Option<(isize, bool)> = None;
         for (key, d) in [(Key::ArrowLeft, -1isize), (Key::ArrowRight, 1), (Key::ArrowUp, -(self.last_cols as isize)), (Key::ArrowDown, self.last_cols as isize)] {
@@ -507,8 +558,8 @@ impl App {
     }
 }
 
-const SHORTCUTS: [(&str, &str); 12] = [
-    ("Ctrl+F", "search the image names"),
+const SHORTCUTS: [(&str, &str); 16] = [
+    ("Ctrl+F", "search the list (images, materials, sounds)"),
     ("Ctrl+O", "open a game folder"),
     ("Ctrl+,", "settings"),
     ("F1", "this list"),
@@ -517,6 +568,10 @@ const SHORTCUTS: [(&str, &str); 12] = [
     ("Ctrl+A", "select everything shown"),
     ("Esc", "clear the selection"),
     ("F", "favourite or unfavourite the selection"),
+    ("E", "export the selection (images: in the format of the settings)"),
+    ("Ctrl+C", "copy the names of the selection"),
+    ("Sounds tab", "Space plays or stops, Up and Down audition, E exports, Ctrl+C copies the name"),
+    ("Search words", "!word excludes; width:>=2048  height  mips  size  length  rate  channels  bits compare a number"),
     ("Click", "select one image"),
     ("Ctrl+click", "add or remove an image"),
     ("Shift+click", "select a range"),

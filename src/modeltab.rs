@@ -48,6 +48,8 @@ pub struct ModelTab {
     viewer: Option<Viewer>,
     ctx: Option<egui::Context>,
     index: Option<Arc<ModelIndex>>,
+    /// How the mouse moves the camera (set from the settings every frame).
+    pub camera_style: viewer::CameraStyle,
     index_status: String,
     index_jobs: usize,
     index_progress: Arc<(std::sync::atomic::AtomicUsize, std::sync::atomic::AtomicUsize)>,
@@ -102,6 +104,7 @@ impl ModelTab {
             viewer: None,
             ctx: None,
             index: None,
+            camera_style: Default::default(),
             index_status: String::new(),
             index_jobs: 0,
             index_progress: Arc::new(Default::default()),
@@ -201,6 +204,11 @@ impl ModelTab {
                 ctx.request_repaint();
             }
         });
+    }
+
+    /// The model index, when one is loaded.
+    pub fn index(&self) -> Option<Arc<ModelIndex>> {
+        self.index.clone()
     }
 
     pub fn set_images(&mut self, images: Option<Arc<Catalog>>) {
@@ -400,6 +408,22 @@ impl ModelTab {
             ui.checkbox(&mut o.formats.cast, "Cast").on_hover_text("Cast (.cast) with the skeleton, skin weights, materials and the animations named below: imports into Blender 3.6+ and Maya through dtzxporter's Cast add-on, in centimetres");
             ui.checkbox(&mut o.images, "textures");
             ui.checkbox(&mut o.formats.seanim, "SEAnim").on_hover_text("Also write the animations named below as xanim/<name>.seanim, and into the glTF");
+        });
+        ui.horizontal_wrapped(|ui| {
+            let o = &mut self.export_options;
+            ui.label("units:");
+            egui::ComboBox::from_id_salt("export_unit")
+                .selected_text(crate::export::Unit::ALL.iter().find(|(u, _)| *u == o.unit).map_or("", |(_, n)| *n))
+                .show_ui(ui, |ui| {
+                    for (u, name) in crate::export::Unit::ALL {
+                        ui.selectable_value(&mut o.unit, u, name);
+                    }
+                })
+                .response
+                .on_hover_text("The unit positions are written in. The game works in inches; glTF, OBJ and XMODEL_EXPORT keep them, SEModel and Cast write centimetres, unless you pick one here for all");
+            ui.label("× ");
+            ui.add(egui::DragValue::new(&mut o.scale).speed(0.01).range(0.0001..=1000.0)).on_hover_text("An extra factor on top of the unit");
+            ui.checkbox(&mut o.bake, "bake animations").on_hover_text("Key every frame of each animation (rotations interpolated) instead of the game's sparse keys, for programs that do not interpolate. Applies to SEAnim and Cast");
         });
         ui.horizontal_wrapped(|ui| {
             ui.label("animations:");
@@ -646,24 +670,11 @@ The model index reads CoDOL QA 3.3.3.3 (v423) and 3.19 (v461) zones; others are 
                     self.camera.fit(lo, hi);
                 }
             }
-            ui.weak("drag: rotate · right-drag: pan · wheel: zoom");
+            ui.weak(self.camera_style.hint());
         });
         let (resp, size) = viewer::viewport_rect(ui);
         let rect = resp.rect;
-        if resp.dragged_by(egui::PointerButton::Primary) {
-            let d = resp.drag_delta();
-            self.camera.orbit(d.x, d.y);
-        }
-        if resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle) {
-            let d = resp.drag_delta();
-            self.camera.pan(d.x, d.y, rect.height());
-        }
-        if resp.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                self.camera.zoom(scroll);
-            }
-        }
+        viewer::camera_input(ui, &resp, rect.height(), &mut self.camera, self.camera_style, 1.0);
         if let Some(v) = &mut self.viewer {
             v.set_features(self.use_normal, self.use_spec);
         }

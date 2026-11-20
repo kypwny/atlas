@@ -341,26 +341,13 @@ impl App {
                 mv.model = None;
                 mv.viewer = None;
             }
-            ui.weak("drag: rotate · right-drag: pan · wheel: zoom · Shift: fine");
+            ui.weak(self.settings.camera_style.hint());
         });
         let (resp, size) = viewer::viewport_rect(ui);
         let rect = resp.rect;
-        // holding Shift slows every movement to a fifth, for fine positioning
-        let fine = if ui.input(|i| i.modifiers.shift) { 0.2 } else { 1.0 };
-        if resp.dragged_by(egui::PointerButton::Primary) {
-            let d = resp.drag_delta() * fine;
-            mv.camera.orbit(d.x, d.y);
-        }
-        if resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle) {
-            let d = resp.drag_delta() * fine;
-            mv.camera.pan(d.x, d.y, rect.height());
-        }
-        if resp.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y) * fine;
-            if scroll != 0.0 {
-                mv.camera.zoom(scroll);
-            }
-        }
+        // in the default style holding Shift slows every movement to a fifth, for fine positioning
+        let fine = if self.settings.camera_style == viewer::CameraStyle::Default && ui.input(|i| i.modifiers.shift) { 0.2 } else { 1.0 };
+        viewer::camera_input(ui, &resp, rect.height(), &mut mv.camera, self.settings.camera_style, fine);
         // the light nearest the pointer (within 14 pixels) is the one whose values and reach are shown
         mv.light_hover = None;
         if mv.show_lights && resp.hovered() {

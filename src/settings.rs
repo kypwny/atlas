@@ -60,6 +60,11 @@ pub struct Settings {
     /// Image names (lowercase).
     pub favourites: BTreeSet<String>,
     pub searches: Vec<SavedSearch>,
+    /// The format the Export button of an image writes, and how normal maps are repaired on the way out.
+    pub image_format: crate::imgexport::ImageFormat,
+    pub normal_fix: crate::imgexport::NormalFix,
+    /// How the mouse moves the camera of the model and map viewers.
+    pub camera_style: crate::viewer::CameraStyle,
 }
 
 pub const MAX_RECENT: usize = 10;
@@ -69,7 +74,7 @@ pub const ACCENTS: [([u8; 3], &str); 6] = [([90, 170, 255], "Blue"), ([80, 200, 
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { dark: true, accent: ACCENTS[0].0, ui_scale: 1.0, thumb: 128, grid_bg: GridBackground::Dark, recent: Vec::new(), favourites: BTreeSet::new(), searches: Vec::new() }
+        Settings { dark: true, accent: ACCENTS[0].0, ui_scale: 1.0, thumb: 128, grid_bg: GridBackground::Dark, recent: Vec::new(), favourites: BTreeSet::new(), searches: Vec::new(), image_format: Default::default(), normal_fix: Default::default(), camera_style: Default::default() }
     }
 }
 
@@ -85,6 +90,9 @@ impl Settings {
             "ui_scale": self.ui_scale,
             "thumb": self.thumb,
             "grid_background": self.grid_bg.code(),
+            "image_format": self.image_format.code(),
+            "normal_fix": self.normal_fix.code(),
+            "camera_style": self.camera_style.code(),
             "recent": self.recent,
             "favourites": self.favourites.iter().collect::<Vec<_>>(),
             "searches": self.searches.iter().map(|s| json!({
@@ -107,6 +115,9 @@ impl Settings {
             thumb: (v["thumb"].as_u64().unwrap_or(d.thumb as u64) as u32).clamp(THUMB_RANGE.0, THUMB_RANGE.1),
             grid_bg: v["grid_background"].as_str().and_then(GridBackground::from_code).unwrap_or(d.grid_bg),
             recent,
+            image_format: v["image_format"].as_str().and_then(crate::imgexport::ImageFormat::from_code).unwrap_or(d.image_format),
+            normal_fix: v["normal_fix"].as_str().and_then(crate::imgexport::NormalFix::from_code).unwrap_or(d.normal_fix),
+            camera_style: v["camera_style"].as_str().and_then(crate::viewer::CameraStyle::from_code).unwrap_or(d.camera_style),
             favourites: strings("favourites").into_iter().collect(),
             searches: v["searches"]
                 .as_array()
