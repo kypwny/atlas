@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// Asset types read with the schema; every other type of a zone is stepped over by its directory extent.
-const READ: &[u32] = &[0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 20, 22, 24, 27, 30, 31, 36, 37, 40];
+const READ: &[u32] = &[0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 20, 21, 22, 24, 27, 30, 31, 36, 37, 40];
 
 /// The schema for a Call of Duty Online fastfile version (334, 423 or 461).
 pub fn schema(version: u32) -> &'static Schema {
@@ -362,6 +362,33 @@ impl Doc {
         mem["ea"] = align;
     }
 
+    /// Adds an array member of a scalar kind: `n` elements at `off`.
+    fn add_array(&mut self, s: &str, name: &str, off: i64, kind: &str, n: i64) {
+        let mut m = scalar(name, off, kind);
+        m["mods"] = json!([["a", n, null, null]]);
+        self.add(s, m);
+    }
+
+    /// Makes the pointer member `m` of `s` point at `count_member` (a member of the same structure) elements.
+    fn set_count(&mut self, s: &str, m: &str, count_member: &str) {
+        let sid = self.sid(s);
+        let (id, kind, size) = {
+            let c = self.member(s, count_member);
+            (c["_id"].clone(), c["k"].clone(), c["es"].clone())
+        };
+        let expr = json!(["d", sid, [["@", id, 0]], kind, [], size, []]);
+        let mods = self.member(s, m)["mods"].as_array_mut().unwrap();
+        let p = mods.iter_mut().find(|x| x[0] == "p").expect("a pointer member");
+        p[1] = expr;
+    }
+
+    /// Adds a pointer to `n` elements of a scalar kind (counted by `count_member`), copied from member `from` of `from_s`.
+    fn add_ptr(&mut self, s: &str, name: &str, off: i64, from_s: &str, from: &str, kind: &str, count_member: &str) {
+        self.add_like(s, name, off, from_s, from, None);
+        self.kind(s, name, kind);
+        self.set_count(s, name, count_member);
+    }
+
     fn next_id(&self) -> u64 {
         self.v["structs"].as_array().unwrap().iter().flat_map(|s| s["m"].as_array().unwrap().iter()).filter_map(|m| m["_id"].as_u64()).max().unwrap_or(0) + 1
     }
@@ -547,6 +574,7 @@ fn qa_changes(d: &mut Doc, version: u32) {
     // FxElemDef 252 -> 260: a word at +252 and a string at +256 (loaded after the extended definition). The element types are
     // numbered as in IW4 plus none or two from the trail on, and two new types sit at 2 and 4 (sprites that use a material).
     clip_map(d);
+    gfx_world(d, version);
 
     d.set_size("FxElemDef", 260);
     d.add_scalar("FxElemDef", "unknown252", 252, "u32");
@@ -667,6 +695,72 @@ fn clip_map(d: &mut Doc) {
             "dynEntClientList", "dynEntCollList", "checksum", "padding",
         ],
     );
+}
+
+/// The render world (type 21): 1,608 bytes (stock 628), 1,612 in 3.19 (convert_world.rs, replay_world.rs). Against the stock layout the
+/// draw block has three more words behind the reflection probes (a count and two lists, 12 and 1 bytes per record), the light grid and
+/// everything behind it sit 12 bytes later, the sun flare holds two more materials (104 bytes), 960 bytes of values (the "insert",
+/// `zone::world::world_insert`) sit between the sun flare and the outdoor lookup matrix, cells are 48 bytes (a count and a list of
+/// 1-byte records at +40) and reflection probes 20 (a list of lists at +12, count +16). The draw-surface key is 16 bytes (the
+/// material header's `drawSurf` too).
+fn gfx_world(d: &mut Doc, version: u32) {
+    d.shift("GfxWorldDraw", 16, 12);
+    d.add_scalar("GfxWorldDraw", "extraCount", 16, "u32");
+    let rec = d.new_struct("GfxWorldRecord12", 12, 4);
+    d.v["structs"][rec]["leaf"] = json!(1);
+    d.add_array("GfxWorldRecord12", "raw", 0, "u8", 12);
+    d.add_ptr("GfxWorldDraw", "extraRecords12", 20, "GfxWorldDpvsStatic", "sortedSurfIndex", "u16", "extraCount");
+    d.member("GfxWorldDraw", "extraRecords12")["ty"] = json!(rec);
+    d.member("GfxWorldDraw", "extraRecords12")["k"] = json!("");
+    d.member("GfxWorldDraw", "extraRecords12")["tk"] = json!("GfxWorldRecord12");
+    d.member("GfxWorldDraw", "extraRecords12")["es"] = json!(12);
+    d.member("GfxWorldDraw", "extraRecords12")["ea"] = json!(4);
+    d.add_ptr("GfxWorldDraw", "extraRecords1", 24, "GfxCell", "reflectionProbes", "i8", "extraCount");
+    d.order(
+        "GfxWorldDraw",
+        &[
+            "reflectionProbeCount", "reflectionProbes", "reflectionProbeOrigins", "reflectionProbeTextures", "extraCount", "extraRecords12", "extraRecords1", "lightmapCount", "lightmaps", "lightmapPrimaryTextures",
+            "lightmapSecondaryTextures", "lightmapOverridePrimary", "lightmapOverrideSecondary", "vertexCount", "vd", "vertexLayerDataSize", "vld", "indexCount", "indices",
+        ],
+    );
+    d.shift("GfxWorld", 152, 12);
+
+    // sun flare: two more materials after the first two, the rest eight bytes later
+    d.shift("sunflare_t", 12, 8);
+    d.add_like("sunflare_t", "spriteMaterial3", 12, "sunflare_t", "flareMaterial", Some("flareMaterial"));
+    d.add_like("sunflare_t", "spriteMaterial4", 16, "sunflare_t", "flareMaterial", Some("spriteMaterial3"));
+    // the insert, then the outdoor lookup matrix and everything behind it
+    d.shift("GfxWorld", 360, 968);
+    d.add_array("GfxWorld", "unknown368", 368, "u8", 960);
+
+    // cells: 48 bytes with a count at +40 and a list of 1-byte records at +44, loaded behind the reflection probe list
+    d.set_size("GfxCell", 48);
+    d.add_scalar("GfxCell", "extraCount", 40, "i8");
+    d.add_ptr("GfxCell", "extraRecords", 44, "GfxCell", "reflectionProbes", "i8", "extraCount");
+
+    // reflection probes: 20 bytes, a list of lists at +12 (count +16): each list is a pointer and a count of 2-byte records
+    let pl = d.new_struct("GfxProbeList", 8, 4);
+    d.add_scalar("GfxProbeList", "count", 4, "u32");
+    d.add_ptr("GfxProbeList", "records", 0, "GfxWorldDpvsStatic", "sortedSurfIndex", "u16", "count");
+    d.order("GfxProbeList", &["records", "count"]);
+    let _ = pl;
+    d.set_size("GfxReflectionProbe", 20);
+    d.add_scalar("GfxReflectionProbe", "listCount", 16, "u32");
+    d.add_like("GfxReflectionProbe", "lists", 12, "GfxWorldDraw", "extraRecords12", None);
+    d.retype("GfxReflectionProbe", "lists", "GfxProbeList");
+    d.set_count("GfxReflectionProbe", "lists", "listCount");
+    let g = d.sid("GfxReflectionProbe");
+    d.v["structs"][g]["leaf"] = json!(0);
+    // the draw-surface key is 16 bytes
+    d.set_size("GfxDrawSurf", 16);
+    let ds = d.sid("GfxDrawSurf");
+    d.v["structs"][ds]["a"] = json!(8);
+
+    if version == 461 {
+        // 3.19: a word at +0x34 (a sort key) pushes everything behind it four bytes up
+        d.shift("GfxWorld", 52, 4);
+        d.add_scalar("GfxWorld", "sortKeyUnknown", 52, "u32");
+    }
 }
 
 #[cfg(test)]
