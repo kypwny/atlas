@@ -22,6 +22,8 @@ pub enum Fmt {
     Iw5,
     /// Call of Duty Online; the version (334, 423 or 461) is kept next to the format.
     Codol,
+    /// Future Warfare, Xbox 360 development build (big-endian, read only: a source of conversions, never a target).
+    Nx1,
 }
 
 impl Fmt {
@@ -31,6 +33,7 @@ impl Fmt {
             "iw4" | "mw2" => Some(Fmt::Iw4),
             "iw5" | "mw3" => Some(Fmt::Iw5),
             "codol" | "qa" | "codo" => Some(Fmt::Codol),
+            "nx1" => Some(Fmt::Nx1),
             _ => None,
         }
     }
@@ -41,6 +44,7 @@ impl Fmt {
             Fmt::Iw4 => "iw4",
             Fmt::Iw5 => "iw5",
             Fmt::Codol => "codol",
+            Fmt::Nx1 => "nx1",
         }
     }
 
@@ -50,7 +54,7 @@ impl Fmt {
             Fmt::Iw3 => Some(Game::Iw3),
             Fmt::Iw4 => Some(Game::Iw4),
             Fmt::Iw5 => Some(Game::Iw5),
-            Fmt::Codol => None,
+            Fmt::Codol | Fmt::Nx1 => None,
         }
     }
 
@@ -61,11 +65,15 @@ impl Fmt {
             Fmt::Iw4 => 276,
             Fmt::Iw5 => 1,
             Fmt::Codol => fastfile::VERSION_QA,
+            Fmt::Nx1 => 357,
         }
     }
 
     /// Name of asset type `ty` in this layout (Call of Duty Online numbers its types like IW4).
     pub fn type_name(self, ty: u32) -> String {
+        if self == Fmt::Nx1 {
+            return super::nx1::asset_type_name(ty).to_string();
+        }
         self.game().unwrap_or(Game::Iw4).asset_type_name(ty)
     }
 }
@@ -81,6 +89,10 @@ pub struct Input {
 impl Input {
     /// The image as the schema walker takes it (IW3, IW4, IW5 layouts).
     pub fn zone_image(&self) -> ZoneImage {
+        if self.fmt == Fmt::Nx1 {
+            let block_sizes = (0..super::nx1::BLOCKS).map(|i| u32::from_be_bytes(self.image[8 + 4 * i..12 + 4 * i].try_into().unwrap())).collect();
+            return ZoneImage { name: self.name.clone(), image: self.image.clone(), block_sizes };
+        }
         let n = self.fmt.game().map(|g| schema_block_count(g)).unwrap_or(8);
         let block_sizes = (0..n).map(|i| u32_at(&self.image, 8 + 4 * i)).collect();
         ZoneImage { name: self.name.clone(), image: self.image.clone(), block_sizes }
@@ -137,6 +149,7 @@ fn hop(from: Fmt, to: Fmt) -> Option<HopFn> {
         (Fmt::Iw4, Fmt::Iw3) => Some(super::convert_iw3::iw4_to_iw3),
         (Fmt::Iw5, Fmt::Iw4) => Some(super::convert_iw5::iw5_to_iw4),
         (Fmt::Iw4, Fmt::Iw5) => Some(super::convert_iw5::iw4_to_iw5),
+        (Fmt::Nx1, Fmt::Iw4) => Some(super::convert_nx1::nx1_to_iw4),
         _ => None,
     }
 }
@@ -150,6 +163,12 @@ fn iw4_to_codol(input: &Input) -> Result<HopOut> {
 
 /// Opens a fastfile of any supported game: detects the game from its header, inflates it (Call of Duty Online needs the archive key).
 pub fn open_input(path: &Path, key_folder: Option<&Path>) -> Result<Input> {
+    if std::fs::File::open(path).and_then(|mut f| { use std::io::Read; let mut m = [0u8; 4]; f.read_exact(&mut m).map(|_| m) }).is_ok_and(|m| &m == b"NXff") {
+        let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let raw = std::fs::read(path).with_context(|| path.display().to_string())?;
+        let f = super::nx1::open(&raw).with_context(|| path.display().to_string())?;
+        return Ok(Input { fmt: Fmt::Nx1, version: f.version, name, image: f.image });
+    }
     let peek = fastfile::peek(path)?;
     if peek.big_endian {
         bail!("{}: a big-endian (console) fastfile; only PC zones are supported", path.display());

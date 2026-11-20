@@ -93,6 +93,8 @@ struct Member {
     reusable: bool,
     cond: Option<Expr>,
     blk: Option<u8>,
+    /// A block that replaces `blk` when the expression holds (NX1: the loader picks the block of image data by a member).
+    bc: Option<(Expr, u8)>,
     aa: Option<Expr>,
     leaf: bool,
     ign: bool,
@@ -139,6 +141,8 @@ pub struct Schema {
     ptr: usize,
     /// Call of Duty Online: the asset list has 16-byte entries (type, offset, reference, extent) and every asset ends at its extent.
     extents: bool,
+    /// Multi-byte values of the zone being read are big-endian (the Xbox 360 build of NX1; its zones are only read).
+    be: bool,
 }
 
 fn expr_from(v: &Value) -> Result<Expr> {
@@ -197,6 +201,10 @@ impl Schema {
                     reusable: m["re"] == 1,
                     cond: opt_expr(&m["c"])?,
                     blk: m["blk"].as_u64().map(|b| b as u8),
+                    bc: match m.get("bc") {
+                        Some(v) if !v.is_null() => Some((expr_from(&v[0])?, v[1].as_u64().unwrap() as u8)),
+                        _ => None,
+                    },
                     aa: opt_expr(&m["aa"])?,
                     leaf: m["leaf"] == 1,
                     ign: m["ign"] == 1,
@@ -242,6 +250,7 @@ impl Schema {
             has_depends,
             ptr: root["ptr"].as_u64().unwrap_or(4) as usize,
             extents: root["extents"] == true,
+            be: root["be"] == 1,
         })
     }
 
@@ -545,6 +554,76 @@ impl View<'_, '_> {
 
 
 
+/// What a block of loaded bytes is made of, for the byte order of a big-endian zone.
+#[derive(Clone, Copy)]
+enum Swap {
+    /// Words of this many bytes.
+    Unit(usize),
+    /// `count` structures of this schema structure.
+    Structs(usize, usize),
+}
+
+fn swap_units(b: &mut [u8], unit: usize) {
+    if unit > 1 {
+        for c in b.chunks_exact_mut(unit) {
+            c.reverse();
+        }
+    }
+}
+
+/// Swaps the members of one structure in place (a union by its first member).
+fn swap_struct(s: &Schema, sid: usize, b: &mut [u8]) {
+    let st = &s.structs[sid];
+    // members that share their bytes (the flattened unions of the type database) are swapped once
+    let mut done: Vec<(usize, usize)> = Vec::new();
+    for m in &st.members {
+        let off = m.off as usize;
+        if off >= b.len() {
+            continue;
+        }
+        let lead: usize = m.mods.iter().take_while(|x| matches!(x, Mod::Array { .. })).map(|x| if let Mod::Array { n, .. } = x { *n as usize } else { 1 }).product();
+        let ptr = m.mods.iter().any(|x| matches!(x, Mod::Ptr { .. }));
+        let (unit, sub) = if ptr {
+            (s.ptr, None)
+        } else if let Some(t) = m.ty {
+            (s.structs[t].size as usize, Some(t))
+        } else {
+            (m.k.map(|k| k.size()).unwrap_or(1), None)
+        };
+        if st.union {
+            let widest = st.members.iter().map(|x| {
+                let l: usize = x.mods.iter().take_while(|y| matches!(y, Mod::Array { .. })).map(|y| if let Mod::Array { n, .. } = y { *n as usize } else { 1 }).product();
+                let u = if x.mods.iter().any(|y| matches!(y, Mod::Ptr { .. })) { s.ptr } else if let Some(t) = x.ty { s.structs[t].size as usize } else { x.k.map(|k| k.size()).unwrap_or(1) };
+                u * l
+            }).max().unwrap_or(0);
+            if unit * lead != widest {
+                continue;
+            }
+        }
+        if done.iter().any(|&(a, e)| off >= a && off < e) {
+            continue;
+        }
+        done.push((off, off + unit * lead));
+        match sub {
+            Some(t) => {
+                for i in 0..lead {
+                    let o = off + i * unit;
+                    if o + unit <= b.len() {
+                        swap_struct(s, t, &mut b[o..o + unit]);
+                    }
+                }
+            }
+            None => {
+                let end = (off + unit * lead).min(b.len());
+                swap_units(&mut b[off..end], unit);
+            }
+        }
+        if st.union {
+            break;
+        }
+    }
+}
+
 fn align_up(v: usize, a: usize) -> usize {
     if a > 1 { v.div_ceil(a) * a } else { v }
 }
@@ -756,6 +835,45 @@ impl<'a> Walker<'a> {
             self.temp_peak = self.off[b];
         }
         Ok(self.enc(b, start))
+    }
+
+    /// Swaps what `load_n` just took (`n` bytes ending at the top block's position) from the zone's big-endian byte order to the
+    /// walker's (little-endian), by the structure or word size the caller gives. Only zones of a big-endian build need it.
+    fn swap_last(&mut self, n: usize, spec: Swap) {
+        if !self.s.be || n == 0 {
+            return;
+        }
+        let Ok(b) = self.top() else { return };
+        let end = self.off[b];
+        if end < n || self.mem[b].len() < end {
+            return;
+        }
+        let start = end - n;
+        let s = self.s;
+        let mut buf = std::mem::take(&mut self.mem[b]);
+        match spec {
+            Swap::Unit(u) => swap_units(&mut buf[start..end], u),
+            Swap::Structs(sid, count) => {
+                let size = s.structs[sid].size as usize;
+                for i in 0..count {
+                    let (from, to) = (start + i * size, (start + (i + 1) * size).min(end));
+                    if from < to {
+                        swap_struct(s, sid, &mut buf[from..to]);
+                    }
+                }
+            }
+        }
+        self.mem[b] = buf;
+    }
+
+    /// The word size or structure of the elements a member's data is made of.
+    fn swap_of(&self, m: &Member, count: usize) -> Swap {
+        let ptr_elem = matches!(m.mods.last(), Some(Mod::Ptr { .. }));
+        match m.ty {
+            Some(t) if !ptr_elem => Swap::Structs(t, count),
+            _ if ptr_elem => Swap::Unit(self.psz),
+            _ => Swap::Unit(m.k.map(|k| k.size()).unwrap_or(1)),
+        }
     }
 
     fn load_cstr(&mut self) -> Res<()> {
@@ -1194,6 +1312,7 @@ impl<'a> Walker<'a> {
         } else if at_start {
             let n = if has_dyn { st.dynoff as usize } else { st.size as usize };
             self.load_n(n)?;
+            self.swap_last(n, Swap::Structs(sid, 1));
         }
         let pushed = if st.asset {
             self.push_block(self.s.default_normal);
@@ -1274,7 +1393,13 @@ impl<'a> Walker<'a> {
     }
 
     fn load_member_block(&mut self, mc: &Mc, lt: Load) -> Res {
-        let pushed = match mc.m.blk {
+        let mut blk = mc.m.blk;
+        if let Some((e, b)) = &mc.m.bc {
+            if self.eval(e)? != 0 {
+                blk = Some(*b);
+            }
+        }
+        let pushed = match blk {
             Some(b) if b as usize != self.s.default_normal => {
                 self.push_block(b as usize);
                 true
@@ -1454,6 +1579,7 @@ impl<'a> Walker<'a> {
         }
         let es = self.element_size(mc);
         self.load_n(es * cnt)?;
+        self.swap_last(es * cnt, self.swap_of(m, cnt));
         Ok(())
     }
 
@@ -1468,6 +1594,7 @@ impl<'a> Walker<'a> {
         }
         let es = self.element_size(mc);
         self.load_n(es)?;
+        self.swap_last(es, self.swap_of(m, 1));
         Ok(())
     }
 
@@ -1485,6 +1612,8 @@ impl<'a> Walker<'a> {
         if m.after_partial {
             let n = self.full_size(m);
             self.load_n(n)?;
+            let c = m.ty.map(|t| n / (self.s.structs[t].size as usize).max(1)).unwrap_or(n / (m.es.max(1) as usize));
+            self.swap_last(n, self.swap_of(m, c));
         }
         Ok(())
     }
@@ -1511,6 +1640,7 @@ impl<'a> Walker<'a> {
         if m.after_partial {
             let es = self.element_size(mc);
             self.load_n(es * n)?;
+            self.swap_last(es * n, self.swap_of(m, n));
         }
         Ok(())
     }
@@ -1528,6 +1658,7 @@ impl<'a> Walker<'a> {
         }
         let es = self.element_size(mc);
         self.load_n(es * n)?;
+        self.swap_last(es * n, self.swap_of(m, n));
         Ok(())
     }
 
@@ -1559,6 +1690,7 @@ impl<'a> Walker<'a> {
         let size = self.s.structs[sid].size;
         if at_start {
             self.load_n(size as usize * count)?;
+            self.swap_last(size as usize * count, Swap::Structs(sid, count));
         }
         for i in 0..count {
             self.load_struct(sid, false, addr.wrapping_add(size * i as u32))?;
@@ -1606,6 +1738,7 @@ impl<'a> Walker<'a> {
     fn load_ptr_array(&mut self, m: &'static Member, arr: u32, at_start: bool, count: usize) -> Res {
         if at_start {
             self.load_n(self.psz * count)?;
+            self.swap_last(self.psz * count, Swap::Unit(self.psz));
         }
         let asset = m.ty.filter(|&t| self.s.structs[t].asset);
         let root = self.scopes.last().map(|s| s.root).unwrap_or(0);
@@ -1637,6 +1770,7 @@ impl<'a> Walker<'a> {
                 Some(t) => self.load_struct(t, true, a)?,
                 None => {
                     self.load_n(m.es as usize)?;
+                    self.swap_last(m.es as usize, Swap::Unit(m.k.map(|k| k.size()).unwrap_or(1)));
                 }
             }
         }
@@ -1661,6 +1795,7 @@ impl<'a> Walker<'a> {
     fn load_xstring_array(&mut self, at_start: bool, arr: u32, count: usize) -> Res {
         if at_start {
             self.load_n(self.psz * count)?;
+            self.swap_last(self.psz * count, Swap::Unit(self.psz));
         }
         for i in 0..count {
             self.load_xstring(arr.wrapping_add((self.psz * i) as u32))?;
@@ -2056,6 +2191,7 @@ impl<'a> Walker<'a> {
         let arr = self.alloc(psz as i64)?;
         self.wm().pending = Some(Pending { src: entries, slot: None });
         self.load_n(2 * psz * asset_count)?;
+        self.swap_last(2 * psz * asset_count, Swap::Unit(4));
         for i in 0..asset_count {
             let entry = arr + (2 * psz * i) as u32;
             let ty = self.rd32(entry)?;
@@ -2082,9 +2218,16 @@ impl<'a> Walker<'a> {
         if base + list_len > self.img.len() {
             return fail("zone too short for the asset list");
         }
-        let count_at = |i: usize| u32::from_le_bytes(self.img[base + 2 * psz * i..base + 2 * psz * i + 4].try_into().unwrap()) as usize;
+        let be = self.s.be;
+        let count_at = |i: usize| {
+            let b: [u8; 4] = self.img[base + 2 * psz * i..base + 2 * psz * i + 4].try_into().unwrap();
+            (if be { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }) as usize
+        };
         let ptr_at = |i: usize| {
             let o = base + 2 * psz * i + psz;
+            if be {
+                return u32::from_be_bytes(self.img[o..o + 4].try_into().unwrap()) as u64;
+            }
             let mut b = [0u8; 8];
             b[..psz].copy_from_slice(&self.img[o..o + psz]);
             u64::from_le_bytes(b)
@@ -2114,6 +2257,7 @@ impl<'a> Walker<'a> {
             // the entries: (type, pointer), or for Call of Duty Online (type, offset, reference, extent)
             let (stride, slot_off) = if ext { (16usize, 8usize) } else { (2 * psz, psz) };
             self.load_n(stride * asset_count)?;
+            self.swap_last(stride * asset_count, Swap::Unit(4));
             if let Some(r) = self.rec.as_mut() {
                 r.layout.array_pos = array_pos;
                 r.layout.array_count = asset_count;

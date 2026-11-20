@@ -13,6 +13,7 @@ pub mod convert_gfx;
 pub mod convert_iw3;
 pub mod convert_iw5;
 pub mod convert_model;
+pub mod convert_nx1;
 pub mod convert_sound;
 pub mod convert_walk;
 pub mod convert_world;

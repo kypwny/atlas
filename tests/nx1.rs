@@ -64,3 +64,17 @@ fn every_zone_walks_exactly() {
     }
     assert!(bad.is_empty(), "{bad:#?}");
 }
+
+/// NX1 as the source of a conversion to stock Modern Warfare 2: the output is read back by the IW4 walker (`convert` checks it).
+#[test]
+fn a_zone_converts_to_stock_mw2_and_reads_back() {
+    use atlas::zone::convert_cli::{convert, open_input, Fmt};
+    for name in ["code_pre_gfx", "mp_nx_shipyard"] {
+        let Some(p) = zone(name) else { continue };
+        let input = open_input(&p, None).unwrap();
+        assert_eq!(input.fmt, Fmt::Nx1);
+        let (done, steps) = convert(input, Fmt::Iw4).unwrap();
+        assert_eq!(done.fmt, Fmt::Iw4);
+        assert!(steps.last().unwrap().out.assets > 0);
+    }
+}

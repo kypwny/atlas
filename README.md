@@ -34,6 +34,7 @@ Open Call of Duty fastfiles, export models and maps to [Cast](https://github.com
 - Modern Warfare 2
 - Call of Duty 4
 - Modern Warfare 3 (the 64-bit build)
+- Future Warfare, Xbox 360 development build (NX1), zones only
 - Call of Duty HQ (`cod26`), containers only, no decoding
 
 ## Build
