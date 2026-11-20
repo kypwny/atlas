@@ -30,6 +30,7 @@ pub mod pose;
 pub mod query;
 pub mod settings;
 pub mod sound;
+pub mod soundview;
 pub mod source;
 pub mod viewer;
 pub mod wavelet;

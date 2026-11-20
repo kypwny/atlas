@@ -5,8 +5,9 @@ use super::App;
 use crate::log;
 use crate::query::Query;
 use crate::sound::{self, Sound};
+use crate::soundview::{self, View};
 use crate::zone::{export as zexport, fastfile};
-use eframe::egui::{self, Color32, Sense, Stroke};
+use eframe::egui::{self, Color32, ColorImage, Sense, Stroke, TextureHandle};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,6 +55,12 @@ impl Audio {
         self.started = None;
     }
 
+    fn seek(&mut self, to: Duration) {
+        if let Some(p) = &self.player {
+            let _ = p.try_seek(to);
+        }
+    }
+
     fn playing(&self) -> bool {
         self.player.as_ref().is_some_and(|p| !p.empty() && !p.is_paused())
     }
@@ -77,8 +84,9 @@ pub(super) struct SoundState {
     rx: Option<Receiver<Result<Vec<Sound>, String>>>,
     export_rx: Option<Receiver<(Vec<(String, Done)>, String)>>,
     audio: Audio,
-    /// Waveform of the selected sound: (sound index, peaks 0..1).
-    wave: Option<(usize, Vec<f32>)>,
+    /// What was worked out about the selected sound: (sound index, figures and curves, the spectrogram as a texture).
+    view: Option<(usize, Arc<View>, Option<TextureHandle>)>,
+    visual: Visual,
     /// What an export did to each sound, by name.
     done: HashMap<String, Done>,
     /// Bumped whenever the list changes, so the filter runs again.
@@ -95,25 +103,48 @@ impl SoundState {
     }
 }
 
-fn peaks(s: &Sound, buckets: usize) -> Vec<f32> {
-    let Some(pcm) = s.pcm16() else { return Vec::new() };
-    let ch = s.channels.max(1) as usize;
-    let frames = pcm.len() / ch;
-    if frames == 0 {
-        return Vec::new();
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Visual {
+    #[default]
+    Waveform,
+    Spectrogram,
+    Spectrum,
+    Envelope,
+}
+
+impl Visual {
+    /// `ATLAS_SOUND_VISUAL=spectrogram|spectrum|loudness`: the visual to open with (for screenshots).
+    fn from_env() -> Visual {
+        match crate::config::env_var("SOUND_VISUAL").ok().as_deref() {
+            Some("spectrogram") => Visual::Spectrogram,
+            Some("spectrum") => Visual::Spectrum,
+            Some("loudness") => Visual::Envelope,
+            _ => Visual::Waveform,
+        }
     }
-    (0..buckets)
-        .map(|b| {
-            let (a, z) = (b * frames / buckets, ((b + 1) * frames / buckets).max(b * frames / buckets + 1).min(frames));
-            let mut m = 0i32;
-            for f in a..z {
-                for c in 0..ch {
-                    m = m.max((pcm[f * ch + c] as i32).abs());
-                }
-            }
-            m as f32 / 32768.0
-        })
-        .collect()
+
+    const ALL: [(Visual, &'static str); 4] = [(Visual::Waveform, "Waveform"), (Visual::Spectrogram, "Spectrogram"), (Visual::Spectrum, "Spectrum"), (Visual::Envelope, "Loudness")];
+}
+
+fn clock(seconds: f32) -> String {
+    let ms = (seconds * 1000.0).round() as u64;
+    format!("{}:{:02}.{:03}", ms / 60000, ms / 1000 % 60, ms % 1000)
+}
+
+fn db_text(v: f32) -> String {
+    if v.is_finite() { format!("{:.1} dB", v + 0.0).replace("-0.0", "0.0") } else { "-inf".to_string() }
+}
+
+fn spectrogram_image(v: &View) -> ColorImage {
+    let (w, h) = (v.spec_cols, soundview::SPEC_BINS);
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let c = soundview::heat(v.spectrogram[x * h + (h - 1 - y)]);
+            rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+    }
+    ColorImage::from_rgba_unmultiplied([w, h], &rgba)
 }
 
 impl App {
@@ -131,7 +162,7 @@ impl App {
             })
             .collect();
         zones.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
-        self.sounds = SoundState { zones, for_root: Some(root), pending: crate::config::env_var("SOUND_ZONE").ok(), ..Default::default() };
+        self.sounds = SoundState { zones, for_root: Some(root), pending: crate::config::env_var("SOUND_ZONE").ok(), visual: Visual::from_env(), ..Default::default() };
     }
 
     fn start_sound_load(&mut self, zone: usize) {
@@ -142,7 +173,7 @@ impl App {
         self.sounds.visible.clear();
         self.sounds.applied = None;
         self.sounds.selected = None;
-        self.sounds.wave = None;
+        self.sounds.view = None;
         self.sounds.audio.stop();
         self.sounds.generation += 1;
         self.sounds.message = Some(format!("Reading {name} …"));
@@ -221,7 +252,11 @@ impl App {
     fn select_sound(&mut self, i: usize, play: bool) {
         self.sounds.selected = Some(i);
         if let Some(s) = self.sounds.sounds.get(i).cloned() {
-            self.sounds.wave = Some((i, peaks(&s, 600)));
+            let view = s.pcm16().and_then(|p| soundview::analyse(&p, s.channels.max(1) as usize, s.rate)).map(Arc::new);
+            self.sounds.view = view.map(|v| {
+                let tex = self.ctx.load_texture("sound_spectrogram", spectrogram_image(&v), egui::TextureOptions::LINEAR);
+                (i, v, Some(tex))
+            });
             if play {
                 self.play_sound(&s);
             }
@@ -365,6 +400,7 @@ impl App {
             ctx.request_repaint_after(Duration::from_millis(33));
         }
 
+        egui::Panel::right("sound_meta").resizable(true).default_size(330.0).show(ui, |ui| self.sound_details(ui));
         egui::Panel::bottom("sound_player").resizable(false).show(ui, |ui| self.sound_player(ui));
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, self.sounds.visible.len(), |ui, range| {
@@ -385,6 +421,87 @@ impl App {
         });
     }
 
+    /// The panel on the right: the header figures and what the analysis found.
+    fn sound_details(&mut self, ui: &mut egui::Ui) {
+        let Some(s) = self.sounds.selected.and_then(|i| self.sounds.sounds.get(i)).cloned() else {
+            ui.weak("Select a sound.");
+            return;
+        };
+        ui.add(egui::Label::new(egui::RichText::new(&s.name).strong()).wrap());
+        ui.horizontal(|ui| {
+            let playing = self.sounds.audio.playing();
+            if ui.button(if playing { "Stop" } else { "Play" }).clicked() {
+                if playing {
+                    self.sounds.audio.stop();
+                } else {
+                    self.play_sound(&s);
+                }
+            }
+            if ui.button("Export…").clicked() {
+                if let Some(i) = self.sounds.selected {
+                    self.export_one_sound(i);
+                }
+            }
+            if ui.button("Copy name").clicked() {
+                ui.ctx().copy_text(s.name.clone());
+            }
+        });
+        ui.separator();
+        let category = s.name.split(['/', '\\']).next().filter(|c| *c != s.name).unwrap_or("-").to_string();
+        let seconds = s.seconds();
+        let kbps = seconds.filter(|&l| l > 0.0).map(|l| format!("{:.0} kbps", s.data.len() as f32 * 8.0 / l / 1000.0));
+        egui::Grid::new("sound_header").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+            let mut row = |ui: &mut egui::Ui, k: &str, v: String| {
+                ui.weak(k);
+                ui.label(v);
+                ui.end_row();
+            };
+            row(ui, "category", category);
+            row(ui, "zone", s.zone.clone());
+            row(ui, "codec", format!("{} (tag {:#x})", s.format_name(), s.format));
+            row(ui, "rate", format!("{} Hz", s.rate));
+            row(ui, "channels", s.channels.to_string());
+            if s.bits > 0 {
+                row(ui, "bits", s.bits.to_string());
+            }
+            if s.block_align > 0 {
+                row(ui, "block", format!("{} bytes", s.block_align));
+            }
+            row(ui, "length", seconds.map_or("?".into(), clock));
+            row(ui, "frames", s.frames().map_or("?".into(), |f| f.to_string()));
+            row(ui, "size", format!("{:.1} KiB", s.data.len() as f32 / 1024.0));
+            if let Some(k) = kbps {
+                row(ui, "bitrate", k);
+            }
+        });
+        let Some((vi, view, _)) = &self.sounds.view else {
+            ui.separator();
+            ui.weak("Not analysed: this format is not decoded here.");
+            return;
+        };
+        if Some(*vi) != self.sounds.selected {
+            return;
+        }
+        let st = &view.stats;
+        ui.separator();
+        egui::Grid::new("sound_stats").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+            let mut row = |ui: &mut egui::Ui, k: &str, v: String| {
+                ui.weak(k);
+                ui.label(v);
+                ui.end_row();
+            };
+            row(ui, "peak", db_text(st.peak_db));
+            row(ui, "rms", db_text(st.rms_db));
+            row(ui, "centroid", format!("{:.0} Hz", st.centroid_hz));
+            row(ui, "crossings", st.crossings.to_string());
+            row(ui, "silent", if st.silent { "yes" } else { "no" }.to_string());
+            row(ui, "decoded", format!("{} frames, {}", st.frames, clock(st.seconds)));
+            row(ui, "attack", format!("{:.3}s", st.attack_s));
+            row(ui, "head / tail", format!("{:.3}s / {:.3}s", st.head_s, st.tail_s));
+        });
+    }
+
+    /// The strip at the bottom: transport and one of the visuals of the selected sound.
     fn sound_player(&mut self, ui: &mut egui::Ui) {
         let Some(i) = self.sounds.selected else {
             ui.weak("Select a sound to play it: ↑ ↓ to move, Space to play or stop, E to export, Ctrl+C to copy the name.");
@@ -399,30 +516,103 @@ impl App {
                     self.play_sound(&s);
                 }
             }
-            ui.strong(&s.name);
-            ui.weak(format!("{} · {} Hz · {} ch · {} KiB · {}", s.format_name(), s.rate, s.channels, s.data.len() / 1024, s.zone));
-            if ui.button("Copy name").clicked() {
-                ui.ctx().copy_text(s.name.clone());
+            let pos = self.sounds.audio.position().filter(|_| self.sounds.audio.playing());
+            ui.monospace(format!("{} / {}", clock(pos.map_or(0.0, |p| p.as_secs_f32())), s.seconds().map_or("?".into(), clock)));
+            ui.separator();
+            for (v, name) in Visual::ALL {
+                ui.selectable_value(&mut self.sounds.visual, v, name);
+            }
+            if self.sounds.visual != Visual::Spectrum {
+                ui.weak("click to seek while playing");
             }
         });
         if let Some(e) = &self.sounds.audio.error {
             ui.colored_label(Color32::from_rgb(220, 120, 80), e);
         }
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 70.0), Sense::hover());
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 150.0), Sense::click());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
-        if let Some((wi, p)) = &self.sounds.wave {
-            if *wi == i && !p.is_empty() {
-                let (mid, half) = (rect.center().y, rect.height() / 2.0 - 3.0);
-                let accent = Color32::from_rgb(self.settings.accent[0], self.settings.accent[1], self.settings.accent[2]);
-                for (k, v) in p.iter().enumerate() {
-                    let x = rect.left() + (k as f32 + 0.5) / p.len() as f32 * rect.width();
+        let accent = Color32::from_rgb(self.settings.accent[0], self.settings.accent[1], self.settings.accent[2]);
+        let Some((vi, view, tex)) = self.sounds.view.clone() else {
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "not decoded here", egui::FontId::proportional(13.0), Color32::from_gray(120));
+            return;
+        };
+        if vi != i {
+            return;
+        }
+        let grid = Stroke::new(1.0, Color32::from_white_alpha(18));
+        let label = |p: egui::Pos2, t: String| painter.text(p, egui::Align2::LEFT_TOP, t, egui::FontId::monospace(10.0), Color32::from_gray(140));
+        match self.sounds.visual {
+            Visual::Waveform => {
+                let (mid, half) = (rect.center().y, rect.height() / 2.0 - 4.0);
+                painter.line_segment([egui::pos2(rect.left(), mid), egui::pos2(rect.right(), mid)], grid);
+                for (k, v) in view.peaks.iter().enumerate() {
+                    let x = rect.left() + (k as f32 + 0.5) / view.peaks.len() as f32 * rect.width();
                     painter.line_segment([egui::pos2(x, mid - v * half), egui::pos2(x, mid + v * half)], Stroke::new(1.0, accent));
                 }
-                if let (Some(pos), Some(len)) = (self.sounds.audio.position(), s.seconds()) {
-                    if len > 0.0 {
-                        let x = rect.left() + (pos.as_secs_f32() / len).clamp(0.0, 1.0) * rect.width();
-                        painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], Stroke::new(1.5, Color32::WHITE));
+            }
+            Visual::Spectrogram => {
+                if let Some(t) = &tex {
+                    painter.image(t.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                }
+                let nyq = view.rate as f32 / 2.0;
+                for f in [1000.0f32, 5000.0, 10000.0, 15000.0, 20000.0] {
+                    if f < nyq {
+                        let y = rect.bottom() - f / nyq * rect.height();
+                        painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], grid);
+                        label(egui::pos2(rect.left() + 3.0, y), format!("{} kHz", f / 1000.0));
+                    }
+                }
+            }
+            Visual::Envelope => {
+                let n = view.envelope_db.len().max(2);
+                for d in [-20.0f32, -40.0, -60.0, -80.0] {
+                    let y = rect.top() + d / soundview::FLOOR_DB * rect.height();
+                    painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], grid);
+                    label(egui::pos2(rect.left() + 3.0, y), format!("{d} dB"));
+                }
+                let pts: Vec<egui::Pos2> = view.envelope_db.iter().enumerate().map(|(k, d)| egui::pos2(rect.left() + k as f32 / (n - 1) as f32 * rect.width(), rect.top() + d.min(0.0) / soundview::FLOOR_DB * rect.height())).collect();
+                for p in &pts {
+                    painter.line_segment([*p, egui::pos2(p.x, rect.bottom())], Stroke::new(1.0, accent.gamma_multiply(0.35)));
+                }
+                painter.add(egui::Shape::line(pts, Stroke::new(1.5, accent)));
+            }
+            Visual::Spectrum => {
+                let n = view.spectrum_db.len().max(1);
+                let nyq = view.rate as f32 / 2.0;
+                for d in [-20.0f32, -40.0, -60.0, -80.0] {
+                    let y = rect.top() + d / soundview::FLOOR_DB * rect.height();
+                    painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], grid);
+                    label(egui::pos2(rect.left() + 3.0, y), format!("{d} dB"));
+                }
+                let bw = rect.width() / n as f32;
+                for (k, d) in view.spectrum_db.iter().enumerate() {
+                    let top = rect.top() + d.min(0.0) / soundview::FLOOR_DB * rect.height();
+                    let x = rect.left() + k as f32 * bw;
+                    painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x + 0.5, top), egui::pos2(x + bw - 0.5, rect.bottom())), 0.0, accent.gamma_multiply(0.85));
+                }
+                // frequency marks on the log axis, 20 Hz to Nyquist
+                let (lo, hi) = (20f32.ln(), nyq.max(40.0).ln());
+                for f in [100.0f32, 1000.0, 10000.0] {
+                    if f < nyq {
+                        let x = rect.left() + (f.ln() - lo) / (hi - lo) * rect.width();
+                        painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], grid);
+                        label(egui::pos2(x + 3.0, rect.bottom() - 13.0), if f >= 1000.0 { format!("{} kHz", f / 1000.0) } else { format!("{f} Hz") });
+                    }
+                }
+            }
+        }
+        // playhead for the time-based visuals, and a click to seek
+        if self.sounds.visual != Visual::Spectrum {
+            if let Some(len) = s.seconds().filter(|l| *l > 0.0) {
+                if let Some(pos) = self.sounds.audio.position().filter(|_| self.sounds.audio.playing()) {
+                    let x = rect.left() + (pos.as_secs_f32() / len).clamp(0.0, 1.0) * rect.width();
+                    painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], Stroke::new(1.5, Color32::WHITE));
+                }
+                if resp.clicked() && self.sounds.audio.playing() {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * len;
+                        self.sounds.audio.seek(Duration::from_secs_f32(t));
                     }
                 }
             }
