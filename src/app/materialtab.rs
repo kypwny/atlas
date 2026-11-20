@@ -206,7 +206,8 @@ impl App {
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, self.materials.visible.len(), |ui, range| {
             for k in range {
-                let m = all[self.materials.visible[k]];
+                let Some(&mi) = self.materials.visible.get(k) else { continue };
+                let Some(&m) = all.get(mi) else { continue };
                 let text = format!("{:<54} {} images  {}", m.name, image_count(m), m.render.map_or(String::new(), |r| r.describe()));
                 if ui.selectable_label(self.materials.selected.as_deref() == Some(m.name.as_str()), egui::RichText::new(text).monospace()).clicked() {
                     self.materials.selected = Some(m.name.clone());

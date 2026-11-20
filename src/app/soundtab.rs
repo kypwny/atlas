@@ -85,6 +85,8 @@ pub(super) struct SoundState {
     generation: usize,
     /// `ATLAS_SOUND_ZONE=<end of the zone's path>`: the zone to open when the list is there (for screenshots).
     pending: Option<String>,
+    switched: u8,
+    switch_to: Option<usize>,
 }
 
 impl SoundState {
@@ -136,6 +138,9 @@ impl App {
         let Some((name, path)) = self.sounds.zones.get(zone).cloned() else { return };
         self.sounds.zone = Some(zone);
         self.sounds.sounds.clear();
+        // the filtered list still holds indexes into the old sounds: drop it now, not at the next filter run
+        self.sounds.visible.clear();
+        self.sounds.applied = None;
         self.sounds.selected = None;
         self.sounds.wave = None;
         self.sounds.audio.stop();
@@ -165,6 +170,14 @@ impl App {
                         self.sounds.sounds = list.into_iter().map(Arc::new).collect();
                         self.sounds.sounds.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
                         self.sounds.generation += 1;
+                        // development aid: `ATLAS_SOUND_SWITCH=<zone>` opens a second zone once the first has loaded (for reproducing zone switches)
+                        if let Some(next) = crate::config::env_var("SOUND_SWITCH").ok().filter(|_| self.sounds.pending.is_none() && self.sounds.switched == 0) {
+                            self.sounds.switched = 1;
+                            if let Some(i) = self.sounds.zones.iter().position(|z| z.0.to_ascii_lowercase().ends_with(&next.to_ascii_lowercase())) {
+                                self.sounds.switch_to = Some(i);
+                                return;
+                            }
+                        }
                         if self.capture.is_some() {
                             if let Some(i) = (0..self.sounds.sounds.len()).find(|&i| self.sounds.sounds[i].frames().is_some_and(|f| f > 2000)) {
                                 self.select_sound(i, false);
@@ -267,6 +280,10 @@ impl App {
             }
         }
         self.refilter_sounds();
+        // after the filter and before the rows, like a click on the zone box
+        if let Some(i) = self.sounds.switch_to.take() {
+            self.start_sound_load(i);
+        }
         if self.root.is_none() {
             ui.centered_and_justified(|ui| {
                 ui.label("Open a game folder first.");
@@ -352,8 +369,8 @@ impl App {
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, self.sounds.visible.len(), |ui, range| {
             for k in range {
-                let i = self.sounds.visible[k];
-                let s = self.sounds.sounds[i].clone();
+                let Some(&i) = self.sounds.visible.get(k) else { continue };
+                let Some(s) = self.sounds.sounds.get(i).cloned() else { continue };
                 let mark = match self.sounds.done.get(&s.name) {
                     Some(Done::Exported) => "+",
                     Some(Done::Failed) => "!",
