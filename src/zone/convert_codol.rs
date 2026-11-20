@@ -453,6 +453,7 @@ fn build(version: u32) -> Value {
 
 /// QA 3.3.3.3 (423) and 3.19 (461).
 fn qa_changes(d: &mut Doc, version: u32) {
+    // changes shared by every Call of Duty Online build (1.1.1.13, 3.3.3.3, 3.19)
     // PhysPreset: 68 bytes in the IW5 layout. Six scaling members after the first ten (all zero unless the preset names a sound
     // prefix, then 250, 250, 1, 1, 0, 0: 23 of 23 presets with a prefix), the two flag bytes behind them (convert_model.rs).
     d.mv("PhysPreset", "tempDefaultToCylinder", 64);
@@ -501,6 +502,37 @@ fn qa_changes(d: &mut Doc, version: u32) {
     d.mv("XModelLodInfo", "smcBucket", 55);
     d.set_size("XModelLodInfo", 56);
     d.add_like("XModelLodInfo", "surfName", 12, "XModelSurfs", "name", Some("modelSurfs"));
+    // snd_alias_t 100 -> 108: two words after the flags (+60: 50 in 10,089 of 10,768 aliases; +64: nearly always 0), everything
+    // behind them eight bytes up (convert_sound.rs).
+    d.shift("snd_alias_t", 60, 8);
+    d.add_scalar("snd_alias_t", "unknown60", 60, "u32");
+    d.add_scalar("snd_alias_t", "unknown64", 64, "u32");
+
+    // LoadedSound 44 -> 48: one word before the data pointer.
+    d.shift("MssSound", 36, 4);
+    d.shift("LoadedSound", 40, 4);
+    d.add_scalar("MssSound", "unknown36", 36, "u32");
+
+    // FxElemDef 252 -> 260: a word at +252 and a string at +256 (loaded after the extended definition). The element types are
+    // numbered as in IW4 plus none or two from the trail on, and two new types sit at 2 and 4 (sprites that use a material).
+    d.set_size("FxElemDef", 260);
+    d.add_scalar("FxElemDef", "unknown252", 252, "u32");
+    d.add_like("FxElemDef", "name256", 256, "FxEffectDefRef", "name", Some("extended"));
+    for (s, m) in [("FxElemVisuals", "material"), ("FxElemVisuals", "model"), ("FxElemVisuals", "effectDef"), ("FxElemVisuals", "soundName"), ("FxElemDefVisuals", "markArray"), ("FxElemExtendedDefPtr", "trailDef"), ("FxElemExtendedDefPtr", "sparkFountainDef")] {
+        d.map_elem_types(s, m, &|k| match k {
+            0 | 1 => k,
+            2 => 3,
+            n => n + 2,
+        });
+    }
+    d.or_elem_types("FxElemVisuals", "material", &[2, 4]);
+
+    if version == 334 {
+        c1_changes(d);
+        return;
+    }
+
+    // QA 3.3.3.3 and 3.19
     // a collision surface's triangles are read only when the pointer is -1 (the reference walker), anything else is a reference
     d.member("XModelCollSurf_s", "collTris")["re"] = json!(1);
 
@@ -553,17 +585,6 @@ fn qa_changes(d: &mut Doc, version: u32) {
         }
     }
 
-    // snd_alias_t 100 -> 108: two words after the flags (+60: 50 in 10,089 of 10,768 aliases; +64: nearly always 0), everything
-    // behind them eight bytes up (convert_sound.rs).
-    d.shift("snd_alias_t", 60, 8);
-    d.add_scalar("snd_alias_t", "unknown60", 60, "u32");
-    d.add_scalar("snd_alias_t", "unknown64", 64, "u32");
-
-    // LoadedSound 44 -> 48: one word before the data pointer.
-    d.shift("MssSound", 36, 4);
-    d.shift("LoadedSound", 40, 4);
-    d.add_scalar("MssSound", "unknown36", 36, "u32");
-
     // TracerDef 112 -> 116: an effect reference at +8.
     d.shift("TracerDef", 8, 4);
     d.add_asset_like("TracerDef", "effect", 8, "TracerDef", "material", "FxEffectDef", Some("material"));
@@ -571,25 +592,22 @@ fn qa_changes(d: &mut Doc, version: u32) {
     // FxImpactTable: 19 records of 35 effect references (stock 15).
     d.ptr_count("FxImpactTable", "table", 19);
 
-    // FxElemDef 252 -> 260: a word at +252 and a string at +256 (loaded after the extended definition). The element types are
-    // numbered as in IW4 plus none or two from the trail on, and two new types sit at 2 and 4 (sprites that use a material).
-    clip_map(d);
-    gfx_world(d, version);
-
-    d.set_size("FxElemDef", 260);
-    d.add_scalar("FxElemDef", "unknown252", 252, "u32");
-    d.add_like("FxElemDef", "name256", 256, "FxEffectDefRef", "name", Some("extended"));
-    for (s, m) in [("FxElemVisuals", "material"), ("FxElemVisuals", "model"), ("FxElemVisuals", "effectDef"), ("FxElemVisuals", "soundName"), ("FxElemDefVisuals", "markArray"), ("FxElemExtendedDefPtr", "trailDef"), ("FxElemExtendedDefPtr", "sparkFountainDef")] {
-        d.map_elem_types(s, m, &|k| match k {
-            0 | 1 => k,
-            2 => 3,
-            n => n + 2,
-        });
-    }
-    d.or_elem_types("FxElemVisuals", "material", &[2, 4]);
     // FxElemVisStateSample 48 -> 64: each visual state is followed by two words
     d.set_size("FxElemVisStateSample", 64);
     d.mv("FxElemVisStateSample", "amplitude", 32);
+    clip_map(d);
+    gfx_world(d, version);
+}
+
+/// 1.1.1.13 (version 334): the structures of models, sounds and effects are the QA ones (above); materials, technique sets, the collision
+/// map and the render world are stock IW4's (`replay.rs`: `iw4_sizes`); the images are 36 bytes and the impact table has 16 records.
+fn c1_changes(d: &mut Doc) {
+    d.ptr_count("FxImpactTable", "table", 16);
+    // GfxImage 32 -> 36: a word between the last size bytes and the name (measured on 5 images of `code_post_gfx_mp` present in
+    // the stock zone: every word before it is where IW4 has it), the load definition and its data in block 3
+    d.shift("GfxImage", 28, 4);
+    d.add_scalar("GfxImage", "unknown28", 28, "u32");
+    d.member("GfxTexture", "loadDef")["blk"] = json!(3);
 }
 
 /// The collision map (type 15): laid out like IW5's `clipMap_t` (convert_clip.rs, replay_world.rs `collision_qa`). The arrays a brush
