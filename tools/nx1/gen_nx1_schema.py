@@ -27,6 +27,7 @@ gz = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gz)
 sys.argv = _argv
 sys.path.insert(0, HERE)
+import nx1_patches  # noqa: E402
 import pdb_types  # noqa: E402
 
 # asset type number (the NX1 XAssetType enum) -> structure that holds it
@@ -123,7 +124,7 @@ class Builder:
         name = self.def_name(n)
         if name in self.defs:
             return self.defs[name]
-        info = self.t.struct_info(n)
+        info = nx1_patches.split_members(n, self.t.struct_info(n))
         d = gz.Def(info["kind"], name)
         d.calc = True
         d.size = info["size"]
@@ -155,6 +156,15 @@ def closure_defs(types):
     b = Builder(types)
     for name in sorted(set(ASSETS.values())):
         b.struct_def(name)
+    # a sound alias the zone stores by name: a pointer to a structure that holds the name
+    san = gz.Def("struct", "SndAliasName")
+    san.calc, san.size, san.align = True, 4, 4
+    decl = gz.Decl(b.prim("char"), [("p",)])
+    decl.size, decl.align = 4, 4
+    mem = gz.Member("name", decl)
+    mem.offset = 0
+    san.members = [mem]
+    b.defs["SndAliasName"] = san
     for new, old, users in COPIES:
         src = b.struct_def(old)
         d = gz.Def("struct", new)
@@ -173,6 +183,16 @@ def closure_defs(types):
 
 
 class Tolerant(gz.CmdParser):
+    def retype(self, st, mem, to):
+        d = self.c.defs[st]
+        owner = self.c.infos[st] if st in self.c.infos else self.c.by_def[id(d)]
+        for mi in owner.members:
+            if mi.name == mem:
+                mi.m.decl.base = self.c.defs[to]
+                mi.type = self.c.by_def[id(self.c.defs[to])]
+                return
+        raise KeyError(mem)
+
     def set_cmd(self):
         if self.peek() == "blockif":
             # set blockif MEMBER EXPRESSION BLOCK;  the block a member is loaded in when the expression holds
@@ -195,7 +215,14 @@ class Tolerant(gz.CmdParser):
             start = self.p
             kw = self.next()
             try:
-                if kw in ("game", "wordsize"):
+                if kw == "retype":
+                    st, mem, to = self.next(), self.next(), self.next()
+                    while self.peek() == "::":  # a member of a nested structure
+                        self.next()
+                        st, mem = st, mem + "::" + self.next()
+                    self.expect(";")
+                    self.retype(st, mem, to)
+                elif kw in ("game", "wordsize"):
                     while self.next() != ";":
                         pass
                 elif kw == "asset":

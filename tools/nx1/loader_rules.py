@@ -15,6 +15,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import nx1_patches  # noqa: E402
 import pdb_types  # noqa: E402
 
 # ---------------------------------------------------------------------------------------------------------------- lexer
@@ -250,7 +251,7 @@ class Model:
             real = self.resolve_name(name)
             if real is None:
                 return None
-            self.info[name] = self.t.struct_info(real)
+            self.info[name] = nx1_patches.split_members(real, self.t.struct_info(real))
             self.names[name] = real
         return self.info[name]
 
@@ -390,6 +391,7 @@ class Rule:
         self.count = None
         self.align = None
         self.reusable = False
+        self.alias_name = False  # a pointer to a sound alias list that the zone stores as a pointer to its name
         self.block = None
         self.conds = []
         self.todo = []
@@ -414,6 +416,7 @@ class FuncTranslator:
         self.first_load = True
         self.cur_target = None
         self.pointee = {}
+        self.last_target = None
         self.foreign = []
 
     # ----- addresses and expressions
@@ -575,6 +578,20 @@ class FuncTranslator:
         elif k == "if":
             self.if_stmt(node, conds)
         elif k == "do":
+            # a loop over the elements of an embedded array of names (sound aliases, script strings)
+            kinds = {c[1] for c in self.calls_in(node[1], [])}
+            tgt = self.last_target
+            if kinds & {"Load_SndAliasCustom", "Load_ScriptStringCustom", "Load_XString"} and tgt and tgt[0] == self.s:
+                chain = self.chain_at(tgt[1], True)
+                if chain:
+                    r = self.rule(chain)
+                    r.conds = list(conds)
+                    r.string = "Load_XString" in kinds
+                    r.alias_name = "Load_SndAliasCustom" in kinds
+                    r.reusable = r.alias_name
+                    r.script = "Load_ScriptStringCustom" in kinds
+                    self.cur_target = None
+                    return
             self.todo.append("loop in the loader (members inside are loaded once per pass)")
             self.walk(node[1], conds)
         else:
@@ -671,9 +688,13 @@ class FuncTranslator:
             if target is not None and target[0] != self.s:
                 chain = self.m.member_at(target[0], target[1], True)
                 if chain and fn in ("Load_XString", "Load_SndAliasCustom"):
-                    self.foreign.append((self.m.real(target[0]), "::".join(chain), "string"))
+                    self.foreign.append((self.m.real(target[0]), "::".join(chain), "string" if fn == "Load_XString" else "alias"))
                 return
-            r.string = fn in ("Load_XString", "Load_SndAliasCustom")
+            if fn == "Load_SndAliasCustom":
+                r.alias_name = True
+                r.reusable = True
+            else:
+                r.string = fn == "Load_XString"
             r.script = fn.startswith("Load_ScriptString")
         elif fn.startswith("Load_") and len(args) == 1 and args[0] == ("n", 1):
             pass
@@ -694,6 +715,7 @@ class FuncTranslator:
                 base = self.resolve_base(rhs)
                 if base is not None and name.startswith("dword_"):
                     self.cur_target = base
+                    self.last_target = base
                     self.alias[name] = rhs
                     return
                 if name.startswith("dword_"):
@@ -729,7 +751,7 @@ class FuncTranslator:
         if fn.startswith(("Load_XString", "Load_SndAliasCustom")) and target is not None and target[0] != self.s and self.m.struct(target[0]) is not None:
             chain = self.m.member_at(target[0], target[1], True)
             if chain:
-                self.foreign.append((self.m.real(target[0]), "::".join(chain), "string"))
+                self.foreign.append((self.m.real(target[0]), "::".join(chain), "string" if fn.startswith("Load_XString") else "alias"))
             return
         if not fn.startswith("Load_") or target is None or target[0] != self.s:
             if fn.startswith("Load_"):
@@ -750,7 +772,10 @@ class FuncTranslator:
             return
         r.block = self.block_now()
         if is_str:
-            r.string = fn.startswith(("Load_XString", "Load_SndAliasCustom"))
+            r.string = fn.startswith("Load_XString")
+            if fn.startswith("Load_SndAliasCustom"):
+                r.alias_name = True
+                r.reusable = True
             r.script = fn.startswith("Load_ScriptString")
             if fn.endswith("Array") and len(args) == 2:
                 try:
@@ -944,6 +969,8 @@ def emit(model, sname, f, lines):
         base = re.sub(r"(\[\d+\])+", "", name)  # an element of an array of pointers: only the count is per element
         for t in r.todo:
             lines.append("// TODO %s: %s" % (name, t))
+        if r.alias_name:
+            lines.append("retype %s %s SndAliasName;" % (model.real(sname), base))
         if r.string:
             lines.append("set string %s;" % base)
         if r.script:
@@ -959,7 +986,11 @@ def emit(model, sname, f, lines):
         if r.conds:
             lines.append("set condition %s %s;" % (base, " && ".join("( %s )" % c for c in r.conds)))
     for st, name, what in f.foreign:
-        lines.append("set %s %s::%s;" % (what, st, name))
+        if what == "alias":
+            lines.append("retype %s %s SndAliasName;" % (st, name))
+            lines.append("set reusable %s::%s;" % (st, name))
+        else:
+            lines.append("set %s %s::%s;" % (what, st, name))
     for m in s["members"]:
         if m["n"] not in loaded and has_pointer(model, m["t"]):
             lines.append("set condition %s never;" % m["n"])
