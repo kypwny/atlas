@@ -106,6 +106,8 @@ pub struct HopOut {
     pub warnings: BTreeMap<String, usize>,
     /// Assets in the converted zone.
     pub assets: usize,
+    /// Content hashes of the converted assets (only when the hop was asked for them).
+    pub canon: Vec<super::convert_engine::CanonAsset>,
 }
 
 type HopFn = fn(&Input) -> Result<HopOut>;
@@ -117,7 +119,7 @@ pub fn engine_hop(from: Game, to: Game, rules: super::convert_engine::Rules, inp
     let zi = input.zone_image();
     let out = ce::convert_zone(from, &zi, to, rules).map_err(|e| anyhow::anyhow!(e))?;
     let stats = out.stats.into_iter().map(|(ty, (converted, left_out))| (ty, TypeStat { converted, left_out })).collect();
-    Ok(HopOut { image: out.image, stats, nulled: out.nulled, warnings: out.warnings, assets: out.assets })
+    Ok(HopOut { image: out.image, stats, nulled: out.nulled, warnings: out.warnings, assets: out.assets, canon: out.canon })
 }
 
 fn same_game(input: &Input) -> Result<HopOut> {
@@ -143,7 +145,7 @@ fn iw4_to_codol(input: &Input) -> Result<HopOut> {
     let z = input.zone_image();
     let stock = super::convert_walk::ZoneImage { name: z.name, image: z.image, block_sizes: z.block_sizes };
     let c = convert_zone::convert_image(&stock)?;
-    Ok(HopOut { image: c.image, stats: c.stats, nulled: c.nulled, warnings: c.warnings, assets: c.assets })
+    Ok(HopOut { image: c.image, stats: c.stats, nulled: c.nulled, warnings: c.warnings, assets: c.assets, canon: Vec::new() })
 }
 
 /// Opens a fastfile of any supported game: detects the game from its header, inflates it (Call of Duty Online needs the archive key).

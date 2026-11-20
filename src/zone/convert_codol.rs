@@ -87,6 +87,69 @@ header    {:?}", r.positions(), r.block_positions(), zone.block_sizes);
     Ok(())
 }
 
+/// `atlas --convertzone roundtrip GAME_FOLDER STOCK.ff...`: stock MW2 zone -> Call of Duty Online (QA 3.3.3.3) -> stock MW2 again, and
+/// how much of the zone comes back as it was. An asset comes back when a hash of its content (every byte, with each pointer replaced by
+/// what it points at; other assets by type and name) equals the original's; it does not depend on where the data sits in the stream or
+/// on which data is shared.
+pub fn roundtrip(args: &[String]) -> anyhow::Result<()> {
+    use super::convert_cli::{convert, engine_hop, open_input, Fmt};
+    use super::convert_engine::Rules;
+    use super::schema_walk::Game;
+    use anyhow::Context;
+    use std::collections::BTreeMap;
+    let root = std::path::Path::new(args.first().context("game folder")?);
+    let mut total: BTreeMap<u32, [usize; 5]> = BTreeMap::new();
+    let mut bytes: BTreeMap<u32, [usize; 2]> = BTreeMap::new();
+    let mut names: BTreeMap<u32, String> = BTreeMap::new();
+    for path in &args[1..] {
+        let input = open_input(std::path::Path::new(path), None)?;
+        let orig = engine_hop(Game::Iw4, Game::Iw4, Rules { canon: true, ..Default::default() }, &input)?;
+        let (qa, _) = convert(open_input(std::path::Path::new(path), None)?, Fmt::Codol)?;
+        let _ = root;
+        let back = super::convert_from_codol::codol_to_iw4_with(&qa, true)?;
+        let mut after: std::collections::HashMap<(u32, String), (u64, usize)> = std::collections::HashMap::new();
+        for a in &back.canon {
+            after.insert((a.ty, a.name.clone()), (a.hash, a.bytes));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for a in &orig.canon {
+            let e = total.entry(a.ty).or_default();
+            e[0] += 1;
+            let b = bytes.entry(a.ty).or_default();
+            b[1] += a.bytes;
+            names.entry(a.ty).or_insert_with(|| Game::Iw4.asset_type_name(a.ty));
+            match after.get(&(a.ty, a.name.clone())) {
+                Some(&(h, _)) if h == a.hash => {
+                    e[1] += 1;
+                    b[0] += a.bytes;
+                }
+                Some(_) => e[2] += 1,
+                None => e[3] += 1,
+            }
+            seen.insert((a.ty, a.name.clone()));
+        }
+        for a in &back.canon {
+            if !seen.contains(&(a.ty, a.name.clone())) {
+                total.entry(a.ty).or_default()[4] += 1;
+            }
+        }
+        println!("{path}: {} assets, {} after the round trip", orig.canon.len(), back.canon.len());
+    }
+    println!("{:<20} {:>7} {:>10} {:>10} {:>8} {:>8} {:>12}", "type", "assets", "identical", "different", "missing", "new", "bytes ident.");
+    let (mut sum, mut same) = ([0usize; 5], [0usize; 2]);
+    for (ty, e) in &total {
+        let b = bytes[ty];
+        println!("{:<20} {:>7} {:>10} {:>10} {:>8} {:>8} {:>5}/{:<6}", names.get(ty).cloned().unwrap_or_default(), e[0], e[1], e[2], e[3], e[4], b[0], b[1]);
+        for k in 0..5 {
+            sum[k] += e[k];
+        }
+        same[0] += b[0];
+        same[1] += b[1];
+    }
+    println!("{:<20} {:>7} {:>10} {:>10} {:>8} {:>8} {:>5}/{:<6}", "all", sum[0], sum[1], sum[2], sum[3], sum[4], same[0], same[1]);
+    Ok(())
+}
+
 // ------------------------------------------------------------------------------------------------------------ the patcher
 
 /// The IW4 schema as a JSON document with the operations the changes need. Members are identified by an id while the document is
@@ -536,13 +599,15 @@ fn qa_changes(d: &mut Doc, version: u32) {
     // a collision surface's triangles are read only when the pointer is -1 (the reference walker), anything else is a reference
     d.member("XModelCollSurf_s", "collTris")["re"] = json!(1);
 
-    // GfxImage 32 -> 52 (the header maps of convert.rs, measured on 7 aligned words: the name moves to +48, the texture pointer
-    // stays, the load definition and its data are in block 3, not temporary). The platform members sit where the maps put them:
-    // picmip, noPicmip and track at +12, the card memory at +24 and the sizes at +32.
-    d.mv("GfxImage", "picmip", 12);
-    d.mv("GfxImage", "noPicmip", 14);
-    d.mv("GfxImage", "track", 15);
-    d.mv("GfxImage", "cardMemory", 24);
+    // GfxImage 32 -> 52 (convert_gfx.rs, header maps of convert.rs, checked on 479 images present in stock and QA `common_mp`): the
+    // texture pointer and the four type bytes stay, a word at +8 (0x00010200 for an image that may be reduced) and the no-picmip flag
+    // as a word at +12 replace the stock picmip bytes, the card-memory total is the word at +16, the sizes are at +32 and +36, the
+    // name at +48; the load definition and its data are in block 3, not temporary.
+    d.drop_all("GfxImage", &["picmip", "track", "cardMemory"]);
+    d.mv("GfxImage", "noPicmip", 12);
+    d.kind("GfxImage", "noPicmip", "u32");
+    d.add_scalar("GfxImage", "unknown8", 8, "u32");
+    d.add_scalar("GfxImage", "cardTotal", 16, "u32");
     d.mv("GfxImage", "width", 32);
     d.mv("GfxImage", "height", 34);
     d.mv("GfxImage", "depth", 36);

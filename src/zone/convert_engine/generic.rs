@@ -191,6 +191,8 @@ pub struct Rules {
     pub skip: HashMap<String, String>,
     /// Source asset type name (`CLIPMAP_PVS`) -> target asset type name, where the names differ.
     pub type_map: HashMap<String, String>,
+    /// Also compute a layout-independent content hash of every converted asset (`ZoneOut::canon`).
+    pub canon: bool,
 }
 
 /// Plain arrays at least this large are kept apart from the address window of the heap.
@@ -1528,11 +1530,130 @@ fn write_num(heap: &mut Heap, addr: u32, k: Option<Kind>, v: Num) {
 /// The outcome of converting a zone.
 pub struct ZoneOut {
     pub image: Vec<u8>,
+    /// With `Rules::canon`: the content hash of every asset of the converted zone.
+    pub canon: Vec<CanonAsset>,
     /// Per source asset type: (converted, left out by reason).
     pub stats: BTreeMap<u32, (usize, BTreeMap<String, usize>)>,
     pub nulled: usize,
     pub warnings: BTreeMap<String, usize>,
     pub assets: usize,
+}
+
+/// A converted asset and a hash of its content that does not depend on where the data sits in the stream, on how the loader's
+/// pointers are written or on which data is shared: two zones hold the same asset when type, name and hash agree.
+#[derive(Debug, Clone)]
+pub struct CanonAsset {
+    pub ty: u32,
+    pub name: String,
+    pub hash: u64,
+    /// Bytes of the objects the asset is made of (the other assets it refers to are not counted).
+    pub bytes: usize,
+}
+
+fn fnv(h: &mut u64, b: &[u8]) {
+    for &x in b {
+        *h ^= x as u64;
+        *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+/// The content hash of every asset in `top` (type, heap header, name): an object is hashed by its bytes in which each pointer into the
+/// heap is replaced by the hash of what it points at (or, for another asset of the zone, by that asset's type and name).
+fn canonical_assets(heap: &Heap, top: &[(u32, u32, String)]) -> Vec<CanonAsset> {
+    let mut key: HashMap<u32, u64> = HashMap::new();
+    for (ty, hdr, name) in top {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        fnv(&mut h, &ty.to_le_bytes());
+        fnv(&mut h, name.as_bytes());
+        key.insert(*hdr, h);
+    }
+    let limit = HEAP_BASE as u64 + heap.mem.len() as u64;
+    let object = |addr: u32| -> Option<(u32, usize, u32)> {
+        if addr < HEAP_BASE || addr as u64 >= limit {
+            return None;
+        }
+        let off = addr - HEAP_BASE;
+        let i = heap.starts.partition_point(|&s| s <= off).checked_sub(1)?;
+        let (st, len) = (heap.starts[i], heap.lens[i]);
+        (off < st + len).then_some((HEAP_BASE + st, len as usize, off - st))
+    };
+    let words = |start: u32, len: usize| -> Vec<(usize, u32)> {
+        if heap.blobs.contains_key(&(start - HEAP_BASE)) {
+            return Vec::new();
+        }
+        let o = (start - HEAP_BASE) as usize;
+        (0..len / 4).map(|k| (4 * k, u32::from_le_bytes(heap.mem[o + 4 * k..o + 4 * k + 4].try_into().unwrap()))).collect()
+    };
+    let mut out = Vec::with_capacity(top.len());
+    let want = std::env::var("ATLAS_CANON_DUMP").ok();
+    for (ty, hdr, name) in top {
+        if want.as_deref() == Some("list") {
+            eprintln!("canon {ty}:{name}");
+        }
+        let dump = want.as_deref() == Some(&format!("{ty}:{name}"));
+        if dump {
+            eprintln!("asset {ty}:{name}");
+        }
+        let mut memo: HashMap<u32, (u64, usize)> = HashMap::new();
+        let mut state: HashMap<u32, u8> = HashMap::new();
+        let mut stack: Vec<(u32, bool)> = vec![(*hdr, false)];
+        while let Some((st, expanded)) = stack.pop() {
+            if memo.contains_key(&st) {
+                continue;
+            }
+            let Some((_, len, _)) = object(st) else { continue };
+            if !expanded {
+                if state.insert(st, 1).is_some() {
+                    continue;
+                }
+                stack.push((st, true));
+                for (_, w) in words(st, len) {
+                    if let Some((child, _, _)) = object(w) {
+                        if child != st && (child == *hdr || !key.contains_key(&child)) && !state.contains_key(&child) {
+                            stack.push((child, false));
+                        }
+                    }
+                }
+                continue;
+            }
+            let mut h = 0xcbf2_9ce4_8422_2325u64;
+            let blob = heap.blobs.get(&(st - HEAP_BASE));
+            if let Some(b) = blob {
+                fnv(&mut h, b);
+            } else {
+                let o = (st - HEAP_BASE) as usize;
+                let ws = words(st, len);
+                for (at, w) in &ws {
+                    match object(*w) {
+                        Some((child, _, interior)) => {
+                            if child != *hdr && key.contains_key(&child) {
+                                fnv(&mut h, b"T");
+                                fnv(&mut h, &key[&child].to_le_bytes());
+                            } else if let Some(&(ch, _)) = memo.get(&child) {
+                                fnv(&mut h, b"P");
+                                fnv(&mut h, &ch.to_le_bytes());
+                            } else {
+                                fnv(&mut h, b"C");
+                            }
+                            fnv(&mut h, &interior.to_le_bytes());
+                        }
+                        None => fnv(&mut h, &heap.mem[o + at..o + at + 4]),
+                    }
+                }
+                fnv(&mut h, &heap.mem[o + 4 * ws.len()..o + len]);
+            }
+            if dump {
+                let o = (st - HEAP_BASE) as usize;
+                let shown = len.min(96);
+                eprintln!("  object {:#x} len {len}: {}", st - HEAP_BASE, heap.mem[o..o + shown].iter().map(|b| format!("{b:02x}")).collect::<String>());
+            }
+            memo.insert(st, (h, len));
+        }
+        let hash = memo.get(hdr).map(|m| m.0).unwrap_or(0);
+        let bytes: usize = memo.values().map(|m| m.1).sum();
+        out.push(CanonAsset { ty: *ty, name: name.clone(), hash, bytes });
+    }
+    out
 }
 
 /// Maps the asset type of a source entry to the target's by name (`ASSET_TYPE_*`).
@@ -1661,9 +1782,35 @@ pub fn convert_zone_s(game: Game, source: &'static Schema, zone: &ZoneImage, syn
             visit(i, &top, &pos, &c.deps, &mut state, &mut order);
         }
     }
+    let canon = if c.rules.canon {
+        let named: Vec<(u32, u32, String)> = top
+            .iter()
+            .map(|t| {
+                if let Some(&i) = c.by_id.get(&t.id) {
+                    if !c.events[i].name.is_empty() {
+                        return (t.ty, t.ptr, c.events[i].name.clone());
+                    }
+                }
+                let name = c.asset_struct.get(&t.ptr).and_then(|&sid| c.ts.structs[sid].members.iter().find(|m| m.name == "name" && m.is_string)).map(|m| {
+                    let p = c.heap.ptr(t.ptr + m.off);
+                    let mut v = Vec::new();
+                    let mut q = p;
+                    while p != 0 && c.heap.fits(q, 1) && c.heap.get(q, 1)[0] != 0 {
+                        v.push(c.heap.get(q, 1)[0]);
+                        q += 1;
+                    }
+                    String::from_utf8_lossy(&v).into_owned()
+                });
+                (t.ty, t.ptr, name.unwrap_or_default())
+            })
+            .collect();
+        canonical_assets(&c.heap, &named)
+    } else {
+        Vec::new()
+    };
     let strs: Vec<u32> = strings.iter().map(|s| c.heap.alloc_cstr(s)).collect();
     let assets: Vec<(u32, u32)> = order.iter().map(|&i| (top[i].ty, top[i].ptr)).collect();
     let heap = std::mem::replace(&mut c.heap, Heap::new(4));
     let image = emit(target, heap, &strs, &assets)?;
-    Ok(ZoneOut { image, stats, nulled: c.nulled, warnings: std::mem::take(&mut c.warnings), assets: assets.len() })
+    Ok(ZoneOut { image, canon, stats, nulled: c.nulled, warnings: std::mem::take(&mut c.warnings), assets: assets.len() })
 }

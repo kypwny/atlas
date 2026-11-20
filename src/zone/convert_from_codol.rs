@@ -89,25 +89,45 @@ fn clip_map(c: &mut Conv, s: S, t: T) -> R {
     Ok(())
 }
 
+/// The stock card memory of an image is its total (the QA word at +16) in the second slot.
+fn image(c: &mut Conv, s: S, t: T) -> R {
+    c.generic_members(s, t)?;
+    let total = c.si(s, "cardTotal") as u32;
+    if let (true, Some(cm)) = (total != 0, c.t_sub(t, "cardMemory")) {
+        c.heap.set_u32(cm.addr + 4, total);
+    }
+    Ok(())
+}
+
 /// The rules of the conversion: what differs in value (not only in layout) between the two games.
 pub fn rules() -> Rules {
-    let mut r = Rules::default();
+    rules_with(false)
+}
+
+pub fn rules_with(canon: bool) -> Rules {
+    let mut r = Rules { canon, ..Default::default() };
     r.replace.insert("FxElemDef".to_string(), elem_def);
     r.replace.insert("MaterialInfo".to_string(), material_info);
     r.replace.insert("clipMap_t".to_string(), clip_map);
+    r.replace.insert("GfxImage".to_string(), image);
     r
 }
 
 pub fn codol_to_iw4(input: &Input) -> Result<HopOut> {
+    codol_to_iw4_with(input, false)
+}
+
+/// The conversion, with the content hash of every converted asset when `canon` (for the round-trip measurement).
+pub fn codol_to_iw4_with(input: &Input, canon: bool) -> Result<HopOut> {
     debug_assert!(input.fmt == Fmt::Codol);
     let zone = Zone::from_image(input.version, input.image.clone())?;
     let sync = convert_codol::ext_sync(&zone, input.version).map_err(|e| anyhow!(e))?;
     let source = convert_codol::schema(input.version);
     let note = sync.note.clone();
-    let mut out = ce::convert_zone_s(Game::Iw4, source, &input.zone_image(), sync, Game::Iw4, rules()).map_err(|e| anyhow!(e))?;
+    let mut out = ce::convert_zone_s(Game::Iw4, source, &input.zone_image(), sync, Game::Iw4, rules_with(canon)).map_err(|e| anyhow!(e))?;
     if let Some(n) = note {
         *out.warnings.entry(format!("block positions are not checked from there on: {n}")).or_default() += 1;
     }
     let stats = out.stats.into_iter().map(|(ty, (converted, left_out))| (ty, TypeStat { converted, left_out })).collect();
-    Ok(HopOut { image: out.image, stats, nulled: out.nulled, warnings: out.warnings, assets: out.assets })
+    Ok(HopOut { image: out.image, stats, nulled: out.nulled, warnings: out.warnings, assets: out.assets, canon: out.canon })
 }
