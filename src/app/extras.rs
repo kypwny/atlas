@@ -490,8 +490,7 @@ impl App {
             if let Some(cat) = self.catalog.clone() {
                 let names: Vec<String> = self.batch_set().iter().map(|&i| cat.entries[i].name.clone()).collect();
                 if !names.is_empty() {
-                    ctx.copy_text(names.join("
-"));
+                    ctx.copy_text(names.join("\n"));
                 }
             }
         }
