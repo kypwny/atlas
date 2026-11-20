@@ -18,6 +18,7 @@ pub mod convert_sound;
 pub mod convert_walk;
 pub mod convert_world;
 pub mod convert_zone;
+pub mod const_zone;
 pub mod export;
 pub mod fastfile;
 pub mod hq;

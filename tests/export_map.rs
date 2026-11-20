@@ -38,3 +38,25 @@ fn a_stock_map_is_exported_for_each_game_and_reads_back() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Call of Duty Online needs `CODOL_TEST_QA` (a QA 3.3.3.3 game folder, only read) as well: the package gets a generated `MAP_const.ff`,
+/// which `--no-const` leaves out, and the const zone reads back with the QA walker as the marker raw file alone.
+#[test]
+fn a_codol_package_has_a_generated_const_zone() {
+    let (Some(src), Some(game)) = (zone(), std::env::var_os("CODOL_TEST_QA").map(PathBuf::from)) else { return };
+    let root = std::env::temp_dir().join(format!("atlas-exportmap-const-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (s, g) = (src.to_str().unwrap(), game.to_str().unwrap());
+    let with = root.join("with");
+    command(&args(&[s, "--to", "codol", with.to_str().unwrap(), "--game-folder", g])).unwrap();
+    let dir = with.join("client_shipRetail/chinese");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3, "zone, load zone, const zone");
+    let konst = open_input(&dir.join("mp_rust_const.ff"), Some(&game)).unwrap();
+    assert_eq!(atlas::zone::const_zone::parse(&konst.image).unwrap(), [atlas::zone::const_zone::RawFile::marker("mp_rust")]);
+    assert_eq!(konst.image, atlas::zone::const_zone::marker_only("mp_rust"));
+    verify(konst.fmt, &konst.name, &konst.image).unwrap();
+    let without = root.join("without");
+    command(&args(&[s, "--to", "codol", without.to_str().unwrap(), "--game-folder", g, "--no-const"])).unwrap();
+    assert_eq!(std::fs::read_dir(without.join("client_shipRetail/chinese")).unwrap().count(), 2);
+    let _ = std::fs::remove_dir_all(&root);
+}

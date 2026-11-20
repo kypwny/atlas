@@ -1,4 +1,4 @@
-//! `atlas --exportmap SRC.ff --to iw3|iw4|iw5|codol OUT_DIR [--name MAP] [--signed] [--game-folder FOLDER] [--dry-run] [--force]`:
+//! `atlas --exportmap SRC.ff --to iw3|iw4|iw5|codol OUT_DIR [--name MAP] [--signed] [--game-folder FOLDER] [--no-const] [--dry-run] [--force]`:
 //! converts a map zone to the target game and writes a package under OUT_DIR in the folder layout that game loads custom maps from,
 //! ready to be copied into a game folder. Nothing is ever written into a game folder; `--game-folder` is only read, for the archive
 //! key and container the Call of Duty Online format needs (and the key of a Call of Duty Online source).
@@ -28,12 +28,18 @@
 //! * Modern Warfare 3 (`iw5`, the 64-bit build the converter reads): the same folder ASSUMED by analogy; VERIFIED only that
 //!   `iw5mp.exe` has the strings `%s_load`, `%s\%s%s.ff`, `_load`, `usermaps` and `.arena`. No arena file is written.
 //! * Call of Duty Online (`codol`, QA 3.3.3.3, version 423; the converter writes nothing else): `client_shipRetail/chinese/MAP.ff`
-//!   + `MAP_load.ff` next to the stock zones (VERIFIED: that is where the game's own maps are, and the executable names `%s_const`,
-//!   `%s.ff`, `_load`, `_const`, `devmap`). The game's zone list for a map also asks for `MAP_const.ff` (VERIFIED in the 3.19
-//!   loader at 0x49eaf1 and the QA executable's strings); it holds the netcode baselines `mp/constbaselines/*.bin` and a marker
-//!   raw file, none of which can be derived, so it is NOT created. Whether the game goes on without it is UNKNOWN (some stock
-//!   maps of 3.19 have no `_const` or `_load` zone, but may be loaded from `.ifs` archives). A 3.19 (461) folder cannot load
-//!   QA-layout zones.
+//!   + `MAP_load.ff` + `MAP_const.ff` next to the stock zones (VERIFIED: that is where the game's own maps are, and the executable
+//!   names `%s_const`, `%s.ff`, `_load`, `_const`, `devmap`). The loader's zone list for a map asks for `MAP_const.ff` (3.19 loader at
+//!   0x49eaf1, QA loader at 0x49fe30), and a zone file that is missing makes the loader raise `WIN_ZONE_ERROR` unless its name starts
+//!   with `patch` or `ez_` or contains `_load` (QA 0x4a0430, read, not run), so the zone is written ([`super::const_zone`]).
+//!   It holds raw files only: the netcode baselines `mp/constbaselines/bl_pc_MAP_MODE.bin` of the modes in the row of the stock
+//!   table `mp/constBaselinesTable.csv`, then a marker raw file `MAP_const`. VERIFIED on all 65 stock const zones: Atlas lays
+//!   each out byte-identical (inflated image) from its own raw files, and generates the stock `mp_con_spring_const` (the marker
+//!   alone) from nothing. A baseline is a snapshot of a running server and is not derivable; none is needed: the executable
+//!   reads a baseline only for a map with a row in that table (0x584880), and a custom map has none. The generated zone is
+//!   therefore the marker alone; a QA zone exported with a `SRC_const.ff` beside it brings that file unchanged. `--no-const`
+//!   leaves the zone out. Whether the client accepts a marker-only zone for a map is UNKNOWN (nothing is run; the stock map
+//!   `mp_con_spring` ships that way). A 3.19 (461) folder cannot load QA-layout zones.
 //!
 //! Not done: the game's own map list (`mapsTable`, localized names and, for MW3, arenas live inside zones, not in plain files),
 //! images and sounds (IWI files in the `.iwd`; `--packiwd` makes one), and renaming (map names are inside the zone: `.d3dbsp`
@@ -83,6 +89,8 @@ pub struct Target {
     pub dir: &'static str,
     /// Whether the game needs `MAP.arena` next to the zone.
     pub arena: bool,
+    /// Whether the game needs `MAP_const.ff` next to the zone.
+    pub const_zone: bool,
     pub rules: Vec<Rule>,
     /// Console commands that start the map (`{}` is the map name) with their basis.
     pub start: Vec<(&'static str, Basis)>,
@@ -94,6 +102,7 @@ pub struct Target {
 pub enum Role {
     Zone,
     Load,
+    Const,
     Arena,
 }
 
@@ -102,6 +111,7 @@ impl Role {
         match self {
             Role::Zone => "zone",
             Role::Load => "load zone",
+            Role::Const => "const zone",
             Role::Arena => "arena",
         }
     }
@@ -123,11 +133,14 @@ pub fn valid_map_name(name: &str) -> Result<()> {
 }
 
 /// The files `map` needs in the package.
-pub fn layout(target: &Target, map: &str, has_load: bool) -> Vec<Planned> {
+pub fn layout(target: &Target, map: &str, has_load: bool, has_const: bool) -> Vec<Planned> {
     let dir = target.dir.replace("MAP", map);
     let mut out = vec![Planned { rel: format!("{dir}/{map}.ff"), role: Role::Zone }];
     if has_load {
         out.push(Planned { rel: format!("{dir}/{map}_load.ff"), role: Role::Load });
+    }
+    if target.const_zone && has_const {
+        out.push(Planned { rel: format!("{dir}/{map}_const.ff"), role: Role::Const });
     }
     if target.arena {
         out.push(Planned { rel: format!("{dir}/{map}.arena"), role: Role::Arena });
@@ -137,7 +150,7 @@ pub fn layout(target: &Target, map: &str, has_load: bool) -> Vec<Planned> {
 
 /// The layout rules of one target game.
 pub fn target_for(fmt: Fmt) -> Result<Target> {
-    let mut t = Target { fmt, game: "", dir: "usermaps/MAP", arena: false, rules: Vec::new(), start: Vec::new(), not_done: Vec::new() };
+    let mut t = Target { fmt, game: "", dir: "usermaps/MAP", arena: false, const_zone: false, rules: Vec::new(), start: Vec::new(), not_done: Vec::new() };
     let iwd_note = "images and sounds the map reads from IWD files are not part of the zone: pack them into usermaps/MAP/MAP.iwd (atlas --packiwd)".to_string();
     match fmt {
         Fmt::Iw3 => {
@@ -170,11 +183,15 @@ pub fn target_for(fmt: Fmt) -> Result<Target> {
         Fmt::Codol => {
             t.game = "Call of Duty Online (QA 3.3.3.3, fastfile version 423)";
             t.dir = "client_shipRetail/chinese";
+            t.const_zone = true;
             t.rules.push(v("zones go to <game>\\client_shipRetail\\<language>\\MAP.ff (+ MAP_load.ff): every stock map of the QA and 3.19 folders is there, in the 'chinese' folder, and the executable has '%s.ff', '_load', '_const' and 'devmap'"));
-            t.rules.push(v("the loader's zone list for a map is MAP_const, MAP (+ patch_MAP) (3.19 build 1649370 at 0x49eaf1, the QA executable has the same '%s_const' string)"));
+            t.rules.push(v("the loader's zone list for a map is MAP_const, MAP (+ patch_MAP) (3.19 build 1649370 at 0x49eaf1; QA at 0x49fe30 builds '%s_const' the same way); a zone file that is missing raises WIN_ZONE_ERROR unless its name starts with 'patch' or 'ez_' or contains '_load' (QA 0x4a0430, read from the code, not run), so MAP_const.ff is written"));
+            t.rules.push(v("a const zone holds raw files only: mp/constbaselines/bl_pc_MAP_MODE.bin for each mode in the map's row of the stock table mp/constBaselinesTable.csv, then a marker raw file MAP_const; all 65 stock const zones of the QA folder are laid out byte-identical (inflated image) by atlas from their own raw files, and the stock mp_con_spring_const (the marker alone) is generated byte-identical from nothing"));
+            t.rules.push(v("the executable reads a baseline file only for a map that has a row in mp/constBaselinesTable.csv (QA 0x584880, 0x5849f0) and takes zero baselines when the row, the file or its 'IWCB000' header is missing: a custom map has no row, so the marker-only zone atlas writes carries everything the game would read; baselines themselves are snapshots of a running server and cannot be derived"));
+            t.rules.push(a("the client accepts a marker-only MAP_const.ff for a map of its own: the stock mp_con_spring ships that way, but no game was started here, and the loader's other users of the zone list were not read"));
             t.rules.push(a("the unsigned zone is accepted (the container is taken from the folder given with --game-folder, whose zones must be QA 3.3.3.3; --signed keeps that folder's signing); a 3.19 (461) folder cannot load a QA-layout zone"));
             t.start.push(("devmap {}", Basis::Verified));
-            t.not_done.push("MAP_const.ff (netcode baselines mp/constbaselines/*.bin and a marker raw file) cannot be derived and is not created; whether QA 3.3.3.3 loads a map without it is UNKNOWN".into());
+            t.not_done.push("netcode baselines (mp/constbaselines/*.bin) are not made: they are server snapshots; the generated MAP_const.ff has the marker only (a QA SRC_const.ff beside the source is packaged unchanged instead)".into());
             t.not_done.push("the game's map list (mapsTable, localized names) is inside zones and is not touched; start the map from the console".into());
         }
         Fmt::Nx1 => bail!("nx1 is a source only; export to iw3, iw4, iw5 or codol"),
@@ -255,6 +272,37 @@ pub fn prepare(src: &Path, game_folder: Option<&Path>, target: Fmt, signed: bool
     Ok(Prepared { bytes, route, verified, names })
 }
 
+/// The `MAP_const.ff` of a Call of Duty Online package: the `SRC_const.ff` beside a QA source, copied unchanged after its raw files
+/// are read back, else the marker-only zone sealed like the map zone. `game_folder` is only read.
+pub fn prepare_const(map: &str, beside: &Path, game_folder: Option<&Path>, target: Fmt, signed: bool) -> Result<Prepared> {
+    if beside.is_file() {
+        let input = convert_cli::open_input(beside, game_folder)?;
+        if input.fmt == Fmt::Codol && input.version == super::fastfile::VERSION_QA {
+            let files = super::const_zone::parse(&input.image).with_context(|| format!("{} is not a const zone", beside.display()))?;
+            if let Err(e) = super::const_zone::check(map, &files, None) {
+                bail!("{}: not the const zone of {map}: {e}", beside.display());
+            }
+            let baselines = files.len() - 1;
+            return Ok(Prepared {
+                bytes: std::fs::read(beside)?,
+                route: vec![format!("{}: QA const zone of {map} ({baselines} baseline files + marker), copied unchanged", beside.display())],
+                verified: String::new(),
+                names: None,
+            });
+        }
+    }
+    let folder = game_folder.context("the const zone is sealed like the map zone and needs --game-folder")?;
+    let image = super::const_zone::marker_only(map);
+    let verified = convert_cli::verify(target, &format!("{map}_const"), &image).context("the generated const zone does not read cleanly")?;
+    let bytes = convert_cli::encode_fastfile(target, Some(folder), &image, signed)?;
+    Ok(Prepared {
+        bytes,
+        route: vec![format!("generated: the marker raw file {map}_const alone, no baselines ({} bytes inflated); {verified}", image.len())],
+        verified,
+        names: None,
+    })
+}
+
 /// The map name: what the zone holds, checked against `--name` and the file name.
 pub fn resolve_map(stem: &str, requested: Option<&str>, names: Option<&Names>) -> Result<(String, Vec<String>)> {
     let mut notes = Vec::new();
@@ -306,15 +354,16 @@ struct Opts {
     dry_run: bool,
     force: bool,
     signed: bool,
+    no_const: bool,
 }
 
 fn usage() -> anyhow::Error {
-    anyhow::anyhow!("usage: atlas --exportmap SRC.ff --to iw3|iw4|iw5|codol OUT_DIR [--name MAP] [--signed] [--game-folder FOLDER] [--dry-run] [--force]")
+    anyhow::anyhow!("usage: atlas --exportmap SRC.ff --to iw3|iw4|iw5|codol OUT_DIR [--name MAP] [--signed] [--game-folder FOLDER] [--no-const] [--dry-run] [--force]")
 }
 
 fn parse(args: &[String]) -> Result<Opts> {
     let (mut name, mut to, mut game_folder) = (None, None, None);
-    let (mut dry_run, mut force, mut signed) = (false, false, false);
+    let (mut dry_run, mut force, mut signed, mut no_const) = (false, false, false, false);
     let mut positional = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -332,13 +381,14 @@ fn parse(args: &[String]) -> Result<Opts> {
             "--dry-run" => dry_run = true,
             "--force" => force = true,
             "--signed" => signed = true,
+            "--no-const" => no_const = true,
             x if x.starts_with("--") => bail!("unknown option {x}"),
             _ => positional.push(PathBuf::from(&args[i])),
         }
         i += 1;
     }
     let [src, out] = <[PathBuf; 2]>::try_from(positional).map_err(|_| usage())?;
-    Ok(Opts { src, out, to: to.ok_or_else(usage)?, name, game_folder, dry_run, force, signed })
+    Ok(Opts { src, out, to: to.ok_or_else(usage)?, name, game_folder, dry_run, force, signed, no_const })
 }
 
 fn join(root: &Path, rel: &str) -> PathBuf {
@@ -368,11 +418,16 @@ pub fn command(args: &[String]) -> Result<()> {
         }
     }
 
+    // the const zone: a QA source's own zone beside it, else the marker-only zone (Call of Duty Online only)
+    let const_path = o.src.with_file_name(format!("{stem}_const.ff"));
+    let konst = if t.const_zone && !o.no_const { Some(prepare_const(&map, &const_path, gf, t.fmt, o.signed)?) } else { None };
+
     let mut files: Vec<(Planned, Vec<u8>)> = Vec::new();
-    for p in layout(&t, &map, load.is_some()) {
+    for p in layout(&t, &map, load.is_some(), konst.is_some()) {
         let bytes = match p.role {
             Role::Zone => main.bytes.clone(),
             Role::Load => load.as_ref().map(|l| l.bytes.clone()).unwrap_or_default(),
+            Role::Const => konst.as_ref().map(|k| k.bytes.clone()).unwrap_or_default(),
             Role::Arena => arena_text(&map).into_bytes(),
         };
         files.push((p, bytes));
@@ -390,6 +445,14 @@ pub fn command(args: &[String]) -> Result<()> {
             }
         }
         None => println!("  no {stem}_load.ff beside the source: no loading-screen zone is packaged"),
+    }
+    if let Some(k) = &konst {
+        println!("  const zone:");
+        for r in &k.route {
+            println!("    {r}");
+        }
+    } else if t.const_zone {
+        println!("  --no-const: MAP_const.ff is left out (the game's zone list asks for it)");
     }
     for n in &notes {
         println!("  note: {n}");
@@ -475,7 +538,7 @@ mod tests {
     }
 
     fn rels(t: &Target, load: bool) -> Vec<String> {
-        layout(t, "mp_x", load).into_iter().map(|p| p.rel).collect()
+        layout(t, "mp_x", load, true).into_iter().map(|p| p.rel).collect()
     }
 
     #[test]
@@ -497,10 +560,15 @@ mod tests {
     }
 
     #[test]
-    fn codol_goes_to_the_stock_zone_folder_and_reports_the_missing_const_zone() {
+    fn codol_goes_to_the_stock_zone_folder_with_its_const_zone() {
         let t = target_for(Fmt::Codol).unwrap();
-        assert_eq!(rels(&t, true), ["client_shipRetail/chinese/mp_x.ff", "client_shipRetail/chinese/mp_x_load.ff"]);
-        assert!(t.not_done.iter().any(|n| n.contains("_const")));
+        assert_eq!(rels(&t, true), ["client_shipRetail/chinese/mp_x.ff", "client_shipRetail/chinese/mp_x_load.ff", "client_shipRetail/chinese/mp_x_const.ff"]);
+        assert_eq!(layout(&t, "mp_x", false, false).len(), 1, "--no-const and no load zone: the map zone alone");
+        assert!(t.rules.iter().any(|r| r.basis == Basis::Verified && r.text.contains("byte-identical")));
+        assert!(t.rules.iter().any(|r| r.basis == Basis::Assumed && r.text.contains("marker-only")));
+        assert!(t.not_done.iter().any(|n| n.contains("baselines")));
+        // the other games have no const zone
+        assert_eq!(rels(&target_for(Fmt::Iw4).unwrap(), false), ["usermaps/mp_x/mp_x.ff", "usermaps/mp_x/mp_x.arena"]);
         assert!(target_for(Fmt::Nx1).is_err());
     }
 
@@ -534,7 +602,8 @@ mod tests {
         assert!(parse(&args(&["a.ff", "--to", "t6", "out"])).is_err());
         assert!(parse(&args(&["a.ff", "--to", "iw4", "out", "--game", "x"])).is_err());
         let o = parse(&args(&["a.ff", "--to", "cod4", "out", "--dry-run", "--force", "--name", "mp_x", "--game-folder", "g"])).unwrap();
-        assert!(o.dry_run && o.force && o.to == Fmt::Iw3 && o.name.as_deref() == Some("mp_x") && o.game_folder.is_some());
+        assert!(o.dry_run && o.force && o.to == Fmt::Iw3 && o.name.as_deref() == Some("mp_x") && o.game_folder.is_some() && !o.no_const);
+        assert!(parse(&args(&["a.ff", "--to", "codol", "out", "--no-const"])).unwrap().no_const);
     }
 
     #[test]
