@@ -5,6 +5,7 @@ pub mod convert_basic;
 pub mod convert_cli;
 pub mod convert_clip;
 pub mod convert_dev;
+pub mod convert_engine;
 pub mod convert_fx;
 pub mod convert_gfx;
 pub mod convert_model;

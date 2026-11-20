@@ -110,9 +110,25 @@ pub struct HopOut {
 
 type HopFn = fn(&Input) -> Result<HopOut>;
 
+/// A hop run by the schema engine (`convert_engine`): the source zone is walked, its structures rebuilt in the target layout with
+/// `rules`, and the target stream written by the loader's own rules.
+pub fn engine_hop(from: Game, to: Game, rules: super::convert_engine::Rules, input: &Input) -> Result<HopOut> {
+    use super::convert_engine as ce;
+    let zi = input.zone_image();
+    let out = ce::convert_zone(from, &zi, to, rules).map_err(|e| anyhow::anyhow!(e))?;
+    let stats = out.stats.into_iter().map(|(ty, (converted, left_out))| (ty, TypeStat { converted, left_out })).collect();
+    Ok(HopOut { image: out.image, stats, nulled: out.nulled, warnings: out.warnings, assets: out.assets })
+}
+
+fn same_game(input: &Input) -> Result<HopOut> {
+    let g = input.fmt.game().context("not a schema game")?;
+    engine_hop(g, g, Default::default(), input)
+}
+
 /// The converter from `from` to `to`, when there is one. Only hops to or from IW4 exist; anything else is composed.
 fn hop(from: Fmt, to: Fmt) -> Option<HopFn> {
     match (from, to) {
+        (a, b) if a == b && a != Fmt::Codol => Some(same_game),
         (Fmt::Iw4, Fmt::Codol) => Some(iw4_to_codol),
         _ => None,
     }
@@ -271,6 +287,7 @@ pub fn command(args: &[String]) -> Result<()> {
     let to = args.get(to_at + 1).context("--to needs a target game")?;
     let target = Fmt::parse(to).with_context(|| format!("unknown target {to:?} (iw3, iw4, iw5 or codol)"))?;
     let mut check = false;
+    let mut batch = false;
     let mut signed = false;
     let mut game_folder: Option<PathBuf> = None;
     let mut positional: Vec<&String> = Vec::new();
@@ -284,12 +301,16 @@ pub fn command(args: &[String]) -> Result<()> {
                 game_folder = Some(PathBuf::from(args.get(i).context("--game needs a folder")?));
             }
             "check" if i == 0 => check = true,
+            "batch" if i == 0 => batch = true,
             a if a.starts_with("--") => bail!("unknown option {a}"),
             _ => positional.push(&args[i]),
         }
         i += 1;
     }
     let (src, rest) = positional.split_first().ok_or_else(usage)?;
+    if batch {
+        return run_batch(Path::new(src.as_str()), target, game_folder.or(rest.first().map(|f| PathBuf::from(f.as_str()))).as_deref());
+    }
     // [GAME_FOLDER] OUT.ff
     let (folder_pos, out): (Option<PathBuf>, Option<PathBuf>) = match (check, rest) {
         (true, []) => (None, None),
@@ -332,4 +353,60 @@ pub fn command(args: &[String]) -> Result<()> {
         println!("{}: {} bytes", out.display(), bytes.len());
     }
     Ok(())
+}
+
+/// `atlas --convertzone batch FOLDER --to TARGET [--game FOLDER]`: converts every zone under FOLDER (writing nothing) and reports
+/// which ones convert and read cleanly.
+fn run_batch(root: &Path, target: Fmt, key_folder: Option<&Path>) -> Result<()> {
+    let mut files = Vec::new();
+    collect(root, &mut files);
+    files.sort();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    let mut totals: BTreeMap<u32, (usize, usize)> = BTreeMap::new();
+    let mut source_fmt = None;
+    let t0 = std::time::Instant::now();
+    for f in &files {
+        let label = f.strip_prefix(root).unwrap_or(f).to_string_lossy().replace('\\', "/");
+        let t = std::time::Instant::now();
+        let r = open_input(f, key_folder).and_then(|inp| {
+            source_fmt = Some(inp.fmt);
+            convert(inp, target)
+        });
+        match r {
+            Ok((_, steps)) => {
+                ok += 1;
+                let first = &steps[0];
+                let (c, l): (usize, usize) = first.out.stats.values().fold((0, 0), |a, s| (a.0 + s.converted, a.1 + s.left_out.values().sum::<usize>()));
+                for (ty, st) in &first.out.stats {
+                    let e = totals.entry(*ty).or_default();
+                    e.0 += st.converted;
+                    e.1 += st.left_out.values().sum::<usize>();
+                }
+                println!("{label}: ok, {c} assets converted, {l} left out, {} nulled references ({:.1}s)", steps.iter().map(|s| s.out.nulled).sum::<usize>(), t.elapsed().as_secs_f32());
+            }
+            Err(e) => {
+                failed += 1;
+                println!("{label}: FAILED: {}", format!("{e:#}").replace(char::from(10), " "));
+            }
+        }
+    }
+    println!("{} zones: {ok} converted and read cleanly, {failed} failed ({:.0}s)", files.len(), t0.elapsed().as_secs_f32());
+    if let Some(sf) = source_fmt {
+        for (ty, (c, l)) in &totals {
+            println!("  type {ty:2} {:18} {c:6} converted, {l:6} left out", sf.type_name(*ty));
+        }
+    }
+    Ok(())
+}
+
+fn collect(p: &Path, out: &mut Vec<PathBuf>) {
+    if p.is_dir() {
+        if let Ok(rd) = std::fs::read_dir(p) {
+            for e in rd.flatten() {
+                collect(&e.path(), out);
+            }
+        }
+    } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ff")) {
+        out.push(p.to_path_buf());
+    }
 }
