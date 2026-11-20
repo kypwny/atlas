@@ -1300,8 +1300,13 @@ impl<'a> Walker<'a> {
                 let v = self.rdp(a)? as u32;
                 self.wrp(slot, v)?;
                 // a reference to an asset loaded earlier: the converter finds it by the slot
-                if let Some(&id) = self.id_at.get(&a) {
-                    self.ref_id.insert(slot, id);
+                match self.lookup_id(a) {
+                    Some(id) => {
+                        self.ref_id.insert(slot, id);
+                    }
+                    None => {
+                        self.ref_id.remove(&slot);
+                    }
                 }
                 self.reuse_key.insert(slot, a);
                 Ok(())
@@ -1684,15 +1689,25 @@ impl<'a> Walker<'a> {
                 let a = self.offset_ref(slot, p, self.psz)?;
                 let v = self.rdp(a)? as u32;
                 self.wrp(slot, v)?;
-                if let Some(&id) = self.id_at.get(&a) {
-                    self.ref_id.insert(slot, id);
+                match self.lookup_id(a) {
+                    Some(id) => {
+                        self.ref_id.insert(slot, id);
+                    }
+                    None => {
+                        self.ref_id.remove(&slot);
+                    }
                 }
                 Ok(())
             } else {
                 let a = self.offset_ref(slot, p, 1)?;
                 self.wrp(slot, a)?;
-                if let Some(&id) = self.id_at.get(&a) {
-                    self.ref_id.insert(slot, id);
+                match self.lookup_id(a) {
+                    Some(id) => {
+                        self.ref_id.insert(slot, id);
+                    }
+                    None => {
+                        self.ref_id.remove(&slot);
+                    }
                 }
                 Ok(())
             }
@@ -1805,6 +1820,17 @@ impl<'a> Walker<'a> {
     }
 
     // ----- write mode
+    /// The asset id registered for an address (a slot or header); 64-bit zones sometimes designate it by the word before.
+    fn lookup_id(&self, a: u32) -> Option<u32> {
+        if let Some(&id) = self.id_at.get(&a) {
+            return Some(id);
+        }
+        if self.psz == 8 {
+            return self.id_at.get(&a.wrapping_add(4)).or_else(|| self.id_at.get(&a.wrapping_sub(4))).copied();
+        }
+        None
+    }
+
     fn ensure(&mut self, b: usize, upto: usize) {
         let k = self.s.blocks[b].1;
         if (k == 0 || k == 3) && self.mem[b].len() < upto {

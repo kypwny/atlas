@@ -1600,7 +1600,7 @@ pub fn convert_zone(game: Game, zone: &ZoneImage, target: Game, rules: Rules) ->
         walk_entries(game, zone, &mut cb)?;
     }
     if c.heap.overflow {
-        return Err("the converted structures do not fit the 256 MB address window of a zone".to_string());
+        return Err("the converted structures do not fit the address window of the heap (or a count is far too large)".to_string());
     }
     // dependencies first
     let mut order: Vec<usize> = Vec::new();
