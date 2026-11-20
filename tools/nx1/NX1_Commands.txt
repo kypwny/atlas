@@ -47,3 +47,84 @@ set count verts0 vertCount;
 set allocalign verts0 16;
 set condition p_stream0 never;
 reorder: vertInfo verts0 vertList triIndices;
+
+// the surfaces of a model: a pointer that the model's level of detail loads in the temporary block (the structure is not an
+// asset of its own in the zones of this build)
+use XModelSurfs;
+set block XFILE_BLOCK_VIRTUAL;
+set allocalign XModelSurfs 4;
+
+use XModelLodInfo;
+set block modelSurfs XFILE_BLOCK_TEMP;
+set reusable modelSurfs;
+set allocalign modelSurfs 4;
+
+// ----- sound aliases: the sound file list is loaded in the temporary block; its length is a global of the loader (the number of
+// sound languages), measured as 1
+use SndAlias;
+set block p_soundFile XFILE_BLOCK_TEMP;
+set reusable p_soundFile;
+set count p_soundFile 1;
+set allocalign p_soundFile 4;
+set condition p_soundFile always;
+reorder: p_aliasName p_subtitle p_secondaryAliasName p_chainAliasName p_mixerGroup p_soundFile p_volumeFalloffCurve p_lpfCurve p_speakerMap p_duckMap;
+
+use SoundFile;
+set condition ref always;
+
+use SoundFileRef;
+set condition loadSnd ( SoundFile::type == 1 ) || ( SoundFile::type == 3 );
+set condition streamSnd SoundFile::type == 2;
+
+// the file name of a streamed sound is two strings when the file index is 0 (the loaders of both users test the same member)
+use StreamFileName;
+set condition info always;
+
+use StreamFileInfo;
+set condition raw StreamFileName::fileIndex == 0;
+
+// ----- collision maps: the brushes of a leaf node follow it when it has any
+use cLeafBrushNodeData_t;
+set condition leaf cLeafBrushNode_s::leafBrushCount > 0;
+
+// ----- effects: what an element shows depends on its type (decal 13, model 9, effect 14, sound 12, none 10 and 11, else a material)
+use FxEffectDefRef;
+set condition handle never;
+set condition name always;
+set string name;
+
+use FxElemDefVisuals;
+set condition markArray FxElemDef::elemType == 13;
+set count markArray FxElemDef::visualCount;
+set allocalign markArray 4;
+set condition array ( FxElemDef::elemType != 13 ) && ( FxElemDef::visualCount > 1 );
+set count array FxElemDef::visualCount;
+set allocalign array 4;
+set condition instance ( FxElemDef::elemType != 13 ) && ( FxElemDef::visualCount <= 1 );
+
+use FxElemVisuals;
+set condition anonymous never;
+set condition model FxElemDef::elemType == 9;
+set condition effectDef FxElemDef::elemType == 14;
+set condition soundName FxElemDef::elemType == 12;
+set string soundName;
+set condition material ( FxElemDef::elemType != 9 ) && ( FxElemDef::elemType != 14 ) && ( FxElemDef::elemType != 12 ) && ( FxElemDef::elemType != 10 ) && ( FxElemDef::elemType != 11 );
+
+// the extra definition of an element: a trail, a spark fountain (52 bytes) or one byte of something else
+use FxElemExtendedDefPtr;
+set condition trailDef FxElemDef::elemType == 3;
+set allocalign trailDef 4;
+set condition sparkFountainDef FxElemDef::elemType == 8;
+set count sparkFountainDef 1;
+set allocalign sparkFountainDef 4;
+set condition unknownDef ( FxElemDef::elemType != 3 ) && ( FxElemDef::elemType != 8 );
+set count unknownDef 1;
+set allocalign unknownDef 1;
+
+// ----- render world
+// every cell tree has as many nodes as the world's table of counts says for its place in the list of trees
+use GfxCellTree;
+set count aabbTree GfxWorld::aabbTreeCounts[GfxCellTree - GfxWorld::aabbTrees];
+
+use GfxLightGrid;
+set count rowDataStart maxs[rowAxis] - mins[rowAxis] + 1;

@@ -4,9 +4,17 @@ use AddonMapEnts;
 set block XFILE_BLOCK_TEMP;
 set allocalign AddonMapEnts 4;
 
+use AudioVolumeSetting;
+set block XFILE_BLOCK_TEMP;
+set allocalign AudioVolumeSetting 4;
+
 use ComWorld;
 set block XFILE_BLOCK_TEMP;
 set allocalign ComWorld 4;
+
+use FogDef;
+set block XFILE_BLOCK_TEMP;
+set allocalign FogDef 4;
 
 use Font_s;
 set block XFILE_BLOCK_TEMP;
@@ -92,6 +100,10 @@ use RawFile;
 set block XFILE_BLOCK_TEMP;
 set allocalign RawFile 4;
 
+use ReverbPreset;
+set block XFILE_BLOCK_TEMP;
+set allocalign ReverbPreset 4;
+
 use ShellShockParams;
 set block XFILE_BLOCK_TEMP;
 set allocalign ShellShockParams 4;
@@ -103,6 +115,14 @@ set allocalign SndAliasList 4;
 use SndDriverGlobals;
 set block XFILE_BLOCK_TEMP;
 set allocalign SndDriverGlobals 4;
+
+use SndLpfCurve;
+set block XFILE_BLOCK_TEMP;
+set allocalign SndLpfCurve 4;
+
+use SndVfCurve;
+set block XFILE_BLOCK_TEMP;
+set allocalign SndVfCurve 4;
 
 use StringTable;
 set block XFILE_BLOCK_TEMP;
@@ -163,13 +183,12 @@ set allocalign entityString 1;
 reorder: name entityString trigger;
 
 use AudioVolumeSetting;
-set block XFILE_BLOCK_VIRTUAL;
 set string p_name;
 reorder: p_name;
 
 use BrushWrapper;
 set reusable planes;
-set count planes brush;
+set count planes brush::numsides;
 set allocalign planes 4;
 reorder: brush planes;
 
@@ -211,7 +230,6 @@ use ExpressionSupportingData;
 reorder: uifunctions staticDvarList uiStrings;
 
 use FogDef;
-set block XFILE_BLOCK_VIRTUAL;
 set string mp_name;
 reorder: mp_name;
 
@@ -279,7 +297,7 @@ set block p_cellBits XFILE_BLOCK_RUNTIME;
 set count p_visData ( ( pieceLimit + 15 ) & 4294967280 );
 set allocalign p_visData 16;
 set block p_visData XFILE_BLOCK_RUNTIME;
-set count p_linkOrg ( ( 12 * pieceLimit ) / 1 );
+set count p_linkOrg pieceLimit;
 set allocalign p_linkOrg 4;
 set block p_linkOrg XFILE_BLOCK_RUNTIME;
 set count p_halfThickness ( ( ( 4 * ( pieceLimit + 3 ) ) & 4294967280 ) / 4 );
@@ -419,7 +437,7 @@ set allocalign cachedPart 4;
 reorder: physicalPart cachedPart;
 
 use GfxPortal;
-set count vertices ( ( 12 * vertexCount ) / 1 );
+set count vertices vertexCount;
 set allocalign vertices 4;
 set condition writable never;
 reorder: vertices;
@@ -457,32 +475,35 @@ set string baseName;
 set count skies skyCount;
 set allocalign skies 4;
 set string skyBoxModel;
-set count aabbTreeCounts dpvsPlanes;
+set count aabbTreeCounts dpvsPlanes::cellCount;
 set allocalign aabbTreeCounts 4;
-set count aabbTrees dpvsPlanes;
+set count aabbTrees dpvsPlanes::cellCount;
 set allocalign aabbTrees 128;
-set count cells dpvsPlanes;
+set count cells dpvsPlanes::cellCount;
 set allocalign cells 4;
 set count models modelCount;
 set allocalign models 4;
 set count materialMemory materialMemoryCount;
 set allocalign materialMemory 4;
-set count cellCasterBits ( ( ( 4 * ( ( dpvsPlanes + 31 ) >> 5 ) ) * dpvsPlanes ) / 4 );
+set count cellCasterBits ( ( ( 4 * ( ( dpvsPlanes::cellCount + 31 ) >> 5 ) ) * dpvsPlanes::cellCount ) / 4 );
 set allocalign cellCasterBits 4;
 set block cellCasterBits XFILE_BLOCK_RUNTIME;
-set count cellHasSunLitSurfsBits ( ( dpvsPlanes + 31 ) >> 5 );
+set count cellHasSunLitSurfsBits ( ( dpvsPlanes::cellCount + 31 ) >> 5 );
 set allocalign cellHasSunLitSurfsBits 4;
 set block cellHasSunLitSurfsBits XFILE_BLOCK_RUNTIME;
 set count sceneDynModel dpvsDyn::dynEntClientCount;
 set allocalign sceneDynModel 4;
 set block sceneDynModel XFILE_BLOCK_RUNTIME;
-set count sceneDynBrush dpvsDyn::dynEntClientCount;
+set count sceneDynBrush dpvsDyn::dynEntClientCount[1];
 set allocalign sceneDynBrush 4;
 set block sceneDynBrush XFILE_BLOCK_RUNTIME;
 set count primaryLightEntityShadowVis ( ( ( primaryLightCount - lastSunPrimaryLightIndex ) << 13 ) - 8192 );
 set allocalign primaryLightEntityShadowVis 4;
 set block primaryLightEntityShadowVis XFILE_BLOCK_RUNTIME;
 set count primaryLightDynEntShadowVis ( ( ( 4 * ( ( primaryLightCount - lastSunPrimaryLightIndex ) - 1 ) ) * dpvsDyn::dynEntClientCount ) / 4 );
+set allocalign primaryLightDynEntShadowVis 4;
+set block primaryLightDynEntShadowVis XFILE_BLOCK_RUNTIME;
+set count primaryLightDynEntShadowVis[1] ( ( ( 4 * ( ( primaryLightCount - lastSunPrimaryLightIndex ) - 1 ) ) * dpvsDyn::dynEntClientCount[1] ) / 1 );
 set allocalign primaryLightDynEntShadowVis 4;
 set block primaryLightDynEntShadowVis XFILE_BLOCK_RUNTIME;
 set count nonSunPrimaryLightForModelDynEnt dpvsDyn::dynEntClientCount;
@@ -497,10 +518,19 @@ set allocalign heroOnlyLights 4;
 reorder: name baseName skies skyBoxModel dpvsPlanes aabbTreeCounts aabbTrees cells draw lightGrid models materialMemory sun outdoorImage cellCasterBits cellHasSunLitSurfsBits sceneDynModel sceneDynBrush primaryLightEntityShadowVis primaryLightDynEntShadowVis nonSunPrimaryLightForModelDynEnt shadowGeom lightRegion dpvs dpvsDyn heroOnlyLights;
 
 use GfxWorldDpvsDynamic;
-set count dynEntCellBits ( ( ( 4 * GfxWorld::dpvsPlanes ) * dynEntClientWordCount ) / 4 );
+set count dynEntCellBits ( ( ( 4 * GfxWorld::dpvsPlanes::cellCount ) * dynEntClientWordCount ) / 4 );
+set allocalign dynEntCellBits 4;
+set block dynEntCellBits XFILE_BLOCK_RUNTIME;
+set count dynEntCellBits[1] ( ( ( 4 * GfxWorld::dpvsPlanes::cellCount ) * dynEntClientWordCount[1] ) / 1 );
 set allocalign dynEntCellBits 4;
 set block dynEntCellBits XFILE_BLOCK_RUNTIME;
 set count dynEntVisData ( 32 * dynEntClientWordCount );
+set allocalign dynEntVisData 16;
+set block dynEntVisData XFILE_BLOCK_RUNTIME;
+set count dynEntVisData[1] ( ( 32 * dynEntClientWordCount[1] ) / 1 );
+set allocalign dynEntVisData 16;
+set block dynEntVisData XFILE_BLOCK_RUNTIME;
+set count dynEntVisData[0] ( ( 32 * dynEntClientWordCount ) / 1 );
 set allocalign dynEntVisData 16;
 set block dynEntVisData XFILE_BLOCK_RUNTIME;
 reorder: dynEntCellBits dynEntVisData;
@@ -520,7 +550,19 @@ use GfxWorldDpvsStatic;
 set count smodelVisData smodelCount;
 set allocalign smodelVisData 1;
 set block smodelVisData XFILE_BLOCK_RUNTIME;
+set count smodelVisData[1] ( smodelCount / 1 );
+set allocalign smodelVisData 1;
+set block smodelVisData XFILE_BLOCK_RUNTIME;
+set count smodelVisData[2] ( smodelCount / 1 );
+set allocalign smodelVisData 1;
+set block smodelVisData XFILE_BLOCK_RUNTIME;
 set count surfaceVisData staticSurfaceCount;
+set allocalign surfaceVisData 1;
+set block surfaceVisData XFILE_BLOCK_RUNTIME;
+set count surfaceVisData[1] ( staticSurfaceCount / 1 );
+set allocalign surfaceVisData 1;
+set block surfaceVisData XFILE_BLOCK_RUNTIME;
+set count surfaceVisData[2] ( staticSurfaceCount / 1 );
 set allocalign surfaceVisData 1;
 set block surfaceVisData XFILE_BLOCK_RUNTIME;
 set count sortedSurfIndex staticSurfaceCount;
@@ -603,7 +645,7 @@ reorder: name columns;
 
 use LoadedSound;
 set string p_name;
-set condition streamFilename::info ( ( streamFilename == 0 ) );
+set condition streamFilename::info ( ( streamFilename::fileIndex == 0 ) );
 reorder: p_name sound streamFilename;
 
 use LocalizeEntry;
@@ -816,14 +858,14 @@ set string p_subtitle;
 set string p_secondaryAliasName;
 set string p_chainAliasName;
 set string p_mixerGroup;
-set string p_speakerMap;
 set reusable p_speakerMap;
 set count p_speakerMap 1;
 set allocalign p_speakerMap 4;
-set string p_duckMap;
 set reusable p_duckMap;
 set count p_duckMap 1;
 set allocalign p_duckMap 4;
+set string SpeakerMap::p_name;
+set string SndDuckMap::p_name;
 set condition p_soundFile never;
 reorder: p_aliasName p_subtitle p_secondaryAliasName p_chainAliasName p_mixerGroup p_volumeFalloffCurve p_lpfCurve p_speakerMap p_duckMap;
 
@@ -848,7 +890,6 @@ set allocalign p_entChannelList 4;
 reorder: p_entChannelList;
 
 use SndLpfCurve;
-set block XFILE_BLOCK_VIRTUAL;
 set string p_filename;
 reorder: p_filename;
 
@@ -856,7 +897,6 @@ use SndPlatformGlobals;
 reorder: reverbPresets;
 
 use SndVfCurve;
-set block XFILE_BLOCK_VIRTUAL;
 set string p_filename;
 reorder: p_filename;
 
@@ -901,7 +941,7 @@ set string p_name;
 reorder: p_dir p_name;
 
 use StreamedSound;
-set condition filename::info ( ( filename == 0 ) );
+set condition filename::info ( ( filename::fileIndex == 0 ) );
 reorder: filename;
 
 use StringList;
@@ -1051,7 +1091,10 @@ set reusable szXAnims;
 set count szXAnims 47;
 set allocalign szXAnims 4;
 set string szAltWeaponName;
-set count accuracyGraphKnots ( ( 8 * accuracyGraphKnotCount ) / 1 );
+set reusable accuracyGraphKnots;
+set count accuracyGraphKnots accuracyGraphKnotCount;
+set allocalign accuracyGraphKnots 4;
+set count accuracyGraphKnots[1] ( ( 8 * accuracyGraphKnotCount[1] ) / 1 );
 set allocalign accuracyGraphKnots 4;
 reorder: szInternalName weapDef szDisplayName hideTags szXAnims szAltWeaponName killIcon dpadIcon accuracyGraphKnots;
 
@@ -1178,7 +1221,11 @@ set allocalign perpendicularBounce 4;
 set string projIgnitionSound;
 set string accuracyGraphName;
 set reusable originalAccuracyGraphKnots;
-set count originalAccuracyGraphKnots ( ( 8 * WeaponCompleteDef::accuracyGraphKnotCount ) / 1 );
+set count originalAccuracyGraphKnots WeaponCompleteDef::accuracyGraphKnotCount;
+set allocalign originalAccuracyGraphKnots 4;
+set string accuracyGraphName;
+set reusable originalAccuracyGraphKnots;
+set count originalAccuracyGraphKnots[1] ( ( 8 * WeaponCompleteDef::accuracyGraphKnotCount[1] ) / 1 );
 set allocalign originalAccuracyGraphKnots 4;
 set string szUseHintString;
 set string dropHintString;
@@ -1259,7 +1306,7 @@ reorder: indices frames;
 use XAnimParts;
 set string name;
 set scriptstring names;
-set count names boneCount;
+set count names boneCount[11];
 set allocalign names 2;
 set count notify notifyCount;
 set allocalign notify 4;
@@ -1362,10 +1409,10 @@ reorder: nodes leafs;
 
 use XSurfaceVertexInfo;
 set reusable vertsBlend;
-set count vertsBlend ( ( ( ( 7 * vertCount ) + ( 5 * vertCount ) ) + ( 3 * vertCount ) ) + vertCount );
+set count vertsBlend ( ( ( ( 7 * vertCount[3] ) + ( 5 * vertCount[2] ) ) + ( 3 * vertCount[1] ) ) + vertCount );
 set allocalign vertsBlend 2;
 set reusable tensionData;
-set count tensionData ( 12 * ( ( ( vertCount + vertCount ) + vertCount ) + vertCount ) );
+set count tensionData ( 12 * ( ( ( vertCount[3] + vertCount[2] ) + vertCount[1] ) + vertCount ) );
 set allocalign tensionData 4;
 reorder: vertsBlend tensionData;
 
@@ -1392,6 +1439,13 @@ reorder: plane;
 
 use cStaticModel_s;
 reorder: xmodel;
+
+use cbrushWrapper_t;
+set count sides numsides;
+set allocalign sides 4;
+set count baseAdjacentSide BrushWrapper::totalEdgeCount;
+set allocalign baseAdjacentSide 1;
+reorder: sides baseAdjacentSide;
 
 use cbrush_t;
 set reusable sides;
@@ -1430,7 +1484,7 @@ set count leafbrushNodes leafbrushNodesCount;
 set allocalign leafbrushNodes 4;
 set count leafsurfaces numLeafSurfaces;
 set allocalign leafsurfaces 4;
-set count verts ( ( 12 * vertCount ) / 1 );
+set count verts vertCount;
 set allocalign verts 4;
 set count triIndices ( 3 * triCount );
 set allocalign triIndices 2;
@@ -1454,13 +1508,24 @@ set count smodelNodes smodelNodeCount;
 set allocalign smodelNodes 4;
 set count dynEntDefList dynEntCount;
 set allocalign dynEntDefList 4;
+set count dynEntDefList[1] dynEntCount[1];
+set allocalign dynEntDefList 4;
 set count dynEntPoseList dynEntCount;
+set allocalign dynEntPoseList 4;
+set block dynEntPoseList XFILE_BLOCK_RUNTIME;
+set count dynEntPoseList[1] ( ( 32 * dynEntCount[1] ) / 1 );
 set allocalign dynEntPoseList 4;
 set block dynEntPoseList XFILE_BLOCK_RUNTIME;
 set count dynEntClientList dynEntCount;
 set allocalign dynEntClientList 4;
 set block dynEntClientList XFILE_BLOCK_RUNTIME;
+set count dynEntClientList[1] ( ( 16 * dynEntCount[1] ) / 1 );
+set allocalign dynEntClientList 4;
+set block dynEntClientList XFILE_BLOCK_RUNTIME;
 set count dynEntCollList dynEntCount;
+set allocalign dynEntCollList 4;
+set block dynEntCollList XFILE_BLOCK_RUNTIME;
+set count dynEntCollList[1] ( ( 20 * dynEntCount[1] ) / 1 );
 set allocalign dynEntCollList 4;
 set block dynEntCollList XFILE_BLOCK_RUNTIME;
 reorder: name planes staticModelList materials brushsides brushEdges nodes leafs leafbrushes leafbrushNodes leafsurfaces verts triIndices triEdgeIsWalkable borders partitions aabbTrees cmodels brushes brushBounds brushContents smodelNodes mapEnts dynEntDefList dynEntPoseList dynEntClientList dynEntCollList;

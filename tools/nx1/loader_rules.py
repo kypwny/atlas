@@ -242,6 +242,11 @@ class Model:
 
     def struct(self, name):
         if name not in self.info:
+            if name in COPIES:
+                # a structure the loaders treat separately that the program database has once (same layout, other rules)
+                self.info[name] = self.struct(COPIES[name])
+                self.names[name] = name
+                return self.info[name]
             real = self.resolve_name(name)
             if real is None:
                 return None
@@ -268,6 +273,9 @@ class Model:
         if t["k"] in ("struct", "union") and (rest > 0 or deep):
             sub = self.member_at(t["n"], rest, deep)
             return [m["n"]] + sub if sub else [m["n"]]
+        if t["k"] == "arr" and rest > 0 and t["n"] > 0:
+            # an element of an array of scalars
+            return ["%s[%d]" % (m["n"], rest // (m["sz"] // t["n"]))]
         return [m["n"]]
 
     def member_deep(self, sname, chain):
@@ -306,6 +314,10 @@ class Model:
         return None
 
 
+# structure -> the structure whose layout it copies
+COPIES = {"cbrushWrapper_t": "cbrush_t"}
+
+
 def struct_of_type(t):
     while t["k"] in ("ptr", "arr", "bits"):
         t = t.get("to") or t.get("of")
@@ -330,12 +342,18 @@ def has_pointer(model, t, seen=None):
 
 def elem_size(model, t):
     """Size of what the first pointer of a member type points at (the element of a pointer array: the pointer)."""
-    mods = 0
     while t["k"] in ("arr",):
         t = t["of"]
     if t["k"] != "ptr":
         return None
     t = t["to"]
+    mult = 1
+    while t["k"] == "arr":  # a pointer to an array: the element is the whole array
+        mult *= t["n"]
+        t = t["of"]
+    if mult > 1:
+        inner = elem_size(model, {"k": "ptr", "to": t})
+        return inner * mult if inner else None
     if t["k"] == "ptr":
         return 4
     if t["k"] == "prim":
@@ -383,6 +401,8 @@ class FuncTranslator:
         self.blk_stack = []
         self.first_load = True
         self.cur_target = None
+        self.pointee = {}
+        self.foreign = []
 
     # ----- addresses and expressions
     def resolve_base(self, e):
@@ -396,6 +416,8 @@ class FuncTranslator:
                     self.alias[e[1]] = tgt
             if e[1] == self.self_var:
                 return (self.s, 0)
+            if e[1] in self.pointee and self.pointee[e[1]]:
+                return (self.pointee[e[1]], 0)
             if e[1] in self.m.gvar:
                 return (self.m.gvar[e[1]], 0)
             return None
@@ -420,7 +442,7 @@ class FuncTranslator:
             if base is None:
                 raise Unsupported("dereference %r" % (e[2],))
             sname, off = base
-            chain = self.m.member_at(sname, off, False)
+            chain = self.m.member_at(sname, off, True)
             if chain is None:
                 raise Unsupported("no member at %s+%d" % (sname, off))
             txt = "::".join(chain)
@@ -581,31 +603,70 @@ class FuncTranslator:
             body = then
         mem = self.m.member_deep(self.s, chain)
         es = elem_size(self.m, mem["t"]) if mem else None
-        for c in self.calls_in(body, []):
-            fn, args = c[1], c[2]
-            if fn == "DB_AllocStreamPos":
-                r.align = args[0][1] + 1 if args[0][0] == "n" else None
-            elif fn == "Load_Stream" and args[0] == ("n", 1):
-                try:
-                    r.count = self.simplify_size(args[2], es)
-                except Unsupported as ex:
-                    r.todo.append("size: %s" % ex)
-            elif fn.startswith("Load_") and fn.endswith("Array") and len(args) == 2:
-                try:
-                    r.count = self.tr(args[1])
-                except Unsupported as ex:
-                    r.todo.append("count: %s" % ex)
-                if fn.startswith("Load_XString"):
-                    r.string = True
-                if fn.startswith("Load_ScriptString"):
-                    r.script = True
-            elif fn in ("Load_XString", "Load_ScriptString", "Load_ScriptStringCustom", "Load_SndAliasCustom"):
-                r.string = fn in ("Load_XString", "Load_SndAliasCustom")
-                r.script = fn.startswith("Load_ScriptString")
-            elif fn.startswith("Load_") and len(args) == 1 and args[0] == ("n", 1):
-                pass
-            elif fn.startswith(("Load_", "DB_")) and fn not in ("DB_PushStreamPos", "DB_PopStreamPos", "DB_InsertPointer", "DB_ConvertOffsetToPointer", "Load_Stream"):
-                r.todo.append("call %s" % fn)
+        pstruct = struct_of_type(mem["t"]) if mem else None
+        for st in self.flat(body):
+            if st[0] == "expr" and st[1][0] == "as" and st[1][1][0] == "v":
+                name, rhs = st[1][1][1], st[1][2]
+                if rhs[0] == "d":
+                    # `dword_x = *(self + off)`: the variable designates what the pointer member points at
+                    pb = self.resolve_base(rhs[2])
+                    if pb is not None and pb[0] == self.s and pstruct:
+                        self.pointee[name] = pstruct
+                    continue
+                pb = self.resolve_base(rhs)
+                if pb is not None and name.startswith("dword_"):
+                    self.cur_target = pb
+                    continue
+            calls = self.calls_in(st, [])
+            for c in calls:
+                self.body_call(r, c, es, pstruct)
+
+    def flat(self, node):
+        out = []
+        if node[0] == "blk":
+            for x in node[1]:
+                out += self.flat(x)
+        elif node[0] == "if":
+            out += self.flat(node[2])
+            if node[3] is not None:
+                out += self.flat(node[3])
+        else:
+            out.append(node)
+        return out
+
+    def body_call(self, r, c, es, pstruct):
+        fn, args = c[1], c[2]
+        target, self.cur_target = self.cur_target, None
+        if fn == "DB_AllocStreamPos":
+            r.align = args[0][1] + 1 if args[0][0] == "n" else None
+            self.cur_target = target
+        elif fn == "Load_Stream" and args[0] == ("n", 1):
+            self.cur_target = target
+            try:
+                r.count = self.simplify_size(args[2], es)
+            except Unsupported as ex:
+                r.todo.append("size: %s" % ex)
+        elif fn.startswith("Load_") and fn.endswith("Array") and len(args) == 2:
+            try:
+                r.count = self.tr(args[1])
+            except Unsupported as ex:
+                r.todo.append("count: %s" % ex)
+            if fn.startswith("Load_XString"):
+                r.string = True
+            if fn.startswith("Load_ScriptString"):
+                r.script = True
+        elif fn in ("Load_XString", "Load_ScriptString", "Load_ScriptStringCustom", "Load_SndAliasCustom"):
+            if target is not None and target[0] != self.s:
+                chain = self.m.member_at(target[0], target[1], True)
+                if chain and fn in ("Load_XString", "Load_SndAliasCustom"):
+                    self.foreign.append((self.m.real(target[0]), "::".join(chain), "string"))
+                return
+            r.string = fn in ("Load_XString", "Load_SndAliasCustom")
+            r.script = fn.startswith("Load_ScriptString")
+        elif fn.startswith("Load_") and len(args) == 1 and args[0] == ("n", 1):
+            pass
+        elif fn.startswith(("Load_", "DB_")) and fn not in ("DB_PushStreamPos", "DB_PopStreamPos", "DB_InsertPointer", "DB_ConvertOffsetToPointer", "Load_Stream"):
+            r.todo.append("call %s" % fn)
 
     def expr_stmt(self, e, conds):
         k = e[0]
@@ -624,6 +685,14 @@ class FuncTranslator:
                     self.alias[name] = rhs
                     return
                 if name.startswith("dword_"):
+                    if rhs[0] == "d":
+                        # `dword_x = *(self + off)`: the variable now designates what that pointer member points at
+                        pbase = self.resolve_base(rhs[2])
+                        if pbase is not None and pbase[0] == self.s:
+                            chain = self.chain_at(pbase[1], True)
+                            mem = self.m.member_deep(self.s, chain) if chain else None
+                            tgt = struct_of_type(mem["t"]) if mem else None
+                            self.pointee[name] = tgt
                     return
                 if rhs == ("v", name):
                     return
@@ -645,6 +714,11 @@ class FuncTranslator:
         if fn == "Load_Stream" or fn in ("DB_InsertPointer", "DB_AllocStreamPos", "DB_ConvertOffsetToPointer"):
             return
         target, self.cur_target = self.cur_target, None
+        if fn.startswith(("Load_XString", "Load_SndAliasCustom")) and target is not None and target[0] != self.s and self.m.struct(target[0]) is not None:
+            chain = self.m.member_at(target[0], target[1], True)
+            if chain:
+                self.foreign.append((self.m.real(target[0]), "::".join(chain), "string"))
+            return
         if not fn.startswith("Load_") or target is None or target[0] != self.s:
             if fn.startswith("Load_"):
                 self.todo.append("call %s" % fn)
@@ -837,7 +911,7 @@ def asset_loaders(ddir):
             continue
         m = re.search(r"DB_PushStreamPos\((\d+)\)", text)
         a = re.search(r"DB_AllocStreamPos\((\d+)\)", text)
-        c = re.search(r"Load_(\w+)\(1\)", text)
+        c = re.search(r"Load_(\w+)\(1\)", text) or re.search(r"Load_(\w+)Asset\(", text)
         if m and a and c:
             out[c.group(1)] = (int(m.group(1)), int(a.group(1)) + 1)
     return out
@@ -851,32 +925,35 @@ def emit(model, sname, f, lines):
         lines.append("set block %s;" % BLOCK_NAMES[f.struct_block])
     for t in f.todo:
         lines.append("// TODO %s" % t)
-    loaded = {r.chain[0] for r in f.rules.values()}
+    loaded = {re.sub(r"\[\d+\]", "", r.chain[0]) for r in f.rules.values()}
     for key in f.order:
         r = f.rules[key]
         name = r.name
+        base = re.sub(r"\[\d+\]", "", name)  # an element of an array of pointers: only the count is per element
         for t in r.todo:
             lines.append("// TODO %s: %s" % (name, t))
         if r.string:
-            lines.append("set string %s;" % name)
+            lines.append("set string %s;" % base)
         if r.script:
-            lines.append("set scriptstring %s;" % name)
+            lines.append("set scriptstring %s;" % base)
         if r.reusable:
-            lines.append("set reusable %s;" % name)
+            lines.append("set reusable %s;" % base)
         if r.count is not None:
             lines.append("set count %s %s;" % (name, r.count))
         if r.align is not None:
-            lines.append("set allocalign %s %d;" % (name, r.align))
+            lines.append("set allocalign %s %d;" % (base, r.align))
         if r.block is not None and r.block != 3:
-            lines.append("set block %s %s;" % (name, BLOCK_NAMES[r.block]))
+            lines.append("set block %s %s;" % (base, BLOCK_NAMES[r.block]))
         if r.conds:
-            lines.append("set condition %s %s;" % (name, " && ".join("( %s )" % c for c in r.conds)))
+            lines.append("set condition %s %s;" % (base, " && ".join("( %s )" % c for c in r.conds)))
+    for st, name, what in f.foreign:
+        lines.append("set %s %s::%s;" % (what, st, name))
     for m in s["members"]:
         if m["n"] not in loaded and has_pointer(model, m["t"]):
             lines.append("set condition %s never;" % m["n"])
     tops = []
     for key in f.order:
-        n = f.rules[key].chain[0]
+        n = re.sub(r"\[\d+\]", "", f.rules[key].chain[0])
         if n not in tops:
             tops.append(n)
     if tops:

@@ -336,6 +336,8 @@ pub struct WalkReport {
     /// Everything matched: all assets walked, the whole stream used, every block at its header size.
     pub exact: bool,
     pub mismatches: Vec<String>,
+    /// Offset pointers that designate nothing inside their block.
+    pub dangling: usize,
     pub assets: Vec<WalkedAsset>,
     pub data: T6Data,
 }
@@ -464,6 +466,8 @@ struct Walker<'a> {
     top_index: usize,
     /// Block operations and offset pointers, when a walk is recorded.
     rec: Option<Box<Rec>>,
+    /// Offset pointers that designate nothing inside their block (see `check_offset`).
+    dangling: std::cell::Cell<usize>,
 }
 
 /// Receives each asset as soon as it is loaded: a read-only view of the memory, the structure's name, the header address and
@@ -586,6 +590,7 @@ impl<'a> Walker<'a> {
             script_strings: (0, 0),
             top_index: 0,
             rec: None,
+            dangling: std::cell::Cell::new(0),
         }
     }
 
@@ -848,6 +853,12 @@ impl<'a> Walker<'a> {
         let q = p.wrapping_sub(1);
         let b = (q >> self.sshift) as usize;
         let o = (q & ((1u64 << self.sshift) - 1)) as usize;
+        // some pointers of this build designate nothing (collision partitions point their borders at an offset in the
+        // temporary block that is far outside it); a pointer that is only stored, never followed, is counted and kept
+        if need <= 1 && (b >= self.sizes.len() || o + need > self.sizes[b]) {
+            self.dangling.set(self.dangling.get() + 1);
+            return Ok(self.enc(b.min(15), o));
+        }
         if b >= self.sizes.len() {
             return fail(format!("offset pointer {p:#x}: no block {b}"));
         }
@@ -1266,6 +1277,9 @@ impl<'a> Walker<'a> {
     fn load_member_pointer_check(&mut self, mc: &Mc, lt: Load) -> Res {
         if self.should_make_pointer_check(mc, lt) {
             let p = self.rdp(self.slot(mc))?;
+            if trace_on() {
+                eprintln!("    pointer {:#x} at {:#x}", p, self.slot(mc));
+            }
             if p == 0 {
                 return Ok(());
             }
@@ -1397,6 +1411,9 @@ impl<'a> Walker<'a> {
         };
         let slot = self.slot(mc);
         let p = self.rdp(slot)? as u32;
+        if trace_on() {
+            eprintln!("    {}: count {cnt}, slot {slot:#x}, pointer {p:#x}", m.name);
+        }
         if let Some(t) = m.ty.filter(|&t| !self.s.structs[t].leaf) {
             if !self.in_runtime_block(m) {
                 return self.load_array(t, true, p, cnt);
@@ -1911,6 +1928,7 @@ fn walk_impl<'a>(game: Game, zone: &'a ZoneImage, hook: Option<&'a mut AssetHook
         temp_peak: 0,
         exact: false,
         mismatches: Vec::new(),
+        dangling: 0,
         assets: Vec::new(),
         data: T6Data::default(),
     };
@@ -1924,6 +1942,7 @@ fn walk_impl<'a>(game: Game, zone: &'a ZoneImage, hook: Option<&'a mut AssetHook
     report.consumed = w.pos;
     report.block_end = w.off.clone();
     report.temp_peak = w.temp_peak;
+    report.dangling = w.dangling.get();
     if let Err(Fail(reason)) = r {
         let (index, ty) = types.last().copied().unwrap_or((0, 0));
         let reason = if w.fail_path.is_empty() { reason } else { format!("{reason} [in {}]", w.fail_path) };
@@ -2019,7 +2038,8 @@ pub fn command(game: Option<Game>, args: &[String]) -> Result<()> {
         match (&rep.failure, rep.exact) {
             (None, true) => {
                 exact += 1;
-                println!("{label}: {}/{} assets, exact ({} stream bytes, blocks {:?})", rep.assets_walked, rep.assets_total, rep.consumed, rep.block_end);
+                let note = if rep.dangling > 0 { format!(", {} stored pointers outside their block", rep.dangling) } else { String::new() };
+                println!("{label}: {}/{} assets, exact ({} stream bytes, blocks {:?}{note})", rep.assets_walked, rep.assets_total, rep.consumed, rep.block_end);
             }
             (None, false) => {
                 partial += 1;

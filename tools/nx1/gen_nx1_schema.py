@@ -31,7 +31,7 @@ import pdb_types  # noqa: E402
 
 # asset type number (the NX1 XAssetType enum) -> structure that holds it
 ASSETS = {
-    "PHYSPRESET": "PhysPreset", "PHYSCOLLMAP": "PhysCollmap", "XANIMPARTS": "XAnimParts", "XMODEL_SURFS": "XModelSurfs",
+    "PHYSPRESET": "PhysPreset", "PHYSCOLLMAP": "PhysCollmap", "XANIMPARTS": "XAnimParts",
     "XMODEL": "XModel", "MATERIAL": "Material", "PIXELSHADER": "MaterialPixelShader", "TECHNIQUE_SET": "MaterialTechniqueSet",
     "IMAGE": "GfxImage", "SOUND": "SndAliasList", "SND_VOLUME_FALLOFF_CURVE": "SndVfCurve", "SND_LPF_CURVE": "SndLpfCurve",
     "LOADED_SOUND": "LoadedSound", "CLIPMAP_SP": "clipMap_t", "CLIPMAP_MP": "clipMap_t", "COMWORLD": "ComWorld",
@@ -45,6 +45,8 @@ ASSETS = {
 }
 # names the Modern Warfare 2 rules use for structures NX1 calls differently
 ALIASES = {"snd_alias_list_t": "SndAliasList"}
+# structures the loaders treat separately that the type database has once: (new name, copied structure, [(owner, member)])
+COPIES = [("cbrushWrapper_t", "cbrush_t", [("BrushWrapper", "brush")])]
 PRIM = {"char": "char", "unsigned char": "unsigned char", "int8_t": "char", "uint8_t": "unsigned char", "short": "short",
         "unsigned short": "unsigned short", "int": "int", "unsigned int": "unsigned int", "long": "int",
         "unsigned long": "unsigned int", "float": "float", "double": "double", "bool": "bool", "int64_t": "long long",
@@ -61,7 +63,8 @@ class Builder:
         self.names = {}  # pdb type name -> def name
 
     def prim(self, name):
-        return self.defs[PRIM.get(name, "int")]
+        # a pointer to void points at bytes
+        return self.defs["unsigned char" if name == "void" else PRIM.get(name, "int")]
 
     def def_name(self, n):
         if n in self.names:
@@ -152,6 +155,16 @@ def closure_defs(types):
     b = Builder(types)
     for name in sorted(set(ASSETS.values())):
         b.struct_def(name)
+    for new, old, users in COPIES:
+        src = b.struct_def(old)
+        d = gz.Def("struct", new)
+        d.calc, d.size, d.align = True, src.size, src.align
+        d.members = list(src.members)
+        b.defs[new] = d
+        for owner, member in users:
+            for m in b.defs[owner].members:
+                if m.name == member:
+                    m.decl.base = d
     # the other structures the rules mention
     for name in ("XModelSurfs", "XSurface", "WeaponDef"):
         if name in types.defs:
@@ -257,7 +270,8 @@ def main():
         if key in ASSETS:
             amap[str(i)] = cmd.infos[ASSETS[key]].sid
     out["assets"] = amap
-    out["skip"] = []
+    # asset types the loader has no case for: their list entries carry no data
+    out["skip"] = [11, 22, 32, 33, 34, 35]
     out["asset_names"] = asset_names + ["ASSET_TYPE_COUNT"]
     out["blocks"] = [
         {"name": "XFILE_BLOCK_TEMP", "kind": 0, "default": 1}, {"name": "XFILE_BLOCK_PHYSICAL", "kind": 3, "default": 0},
