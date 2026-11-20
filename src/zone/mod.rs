@@ -21,6 +21,7 @@ pub mod convert_zone;
 pub mod export;
 pub mod fastfile;
 pub mod hq;
+pub mod export_map;
 pub mod replay;
 pub mod stock;
 pub mod t6;

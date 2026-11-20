@@ -108,6 +108,14 @@ atlas --convertzone MW2.ff GAME_FOLDER OUT.ff
 
 `--convertzone check MW2.ff` converts and runs the reader over the result.
 
+### Export a map
+
+```text
+atlas --exportmap SRC.ff --to iw3|iw4|iw5|codol OUT_DIR [--dry-run]
+```
+
+Converts the zone and writes a folder to copy into the game: `usermaps/MAP` for Call of Duty 4, IW4x and Modern Warfare 3, `client_shipRetail/chinese` for Call of Duty Online QA. It prints which layout rules are verified and which assumed. Nothing is written into a game folder or tried in a game.
+
 ### Check a zone
 
 ```text

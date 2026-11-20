@@ -249,6 +249,27 @@ pub fn write_iw_fastfile(fmt: Fmt, image: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Wraps a converted zone image in the target's fastfile: unsigned for IW3, IW4 and IW5; for Call of Duty Online sealed with the
+/// archive key and container of `folder` (QA 3.3.3.3), signed only when asked and the folder's own zones are, and read back.
+pub fn encode_fastfile(target: Fmt, folder: Option<&Path>, image: &[u8], signed: bool) -> Result<Vec<u8>> {
+    match target {
+        Fmt::Codol => {
+            let root = folder.context("a Call of Duty Online zone needs its game folder")?;
+            let key = super::export::find_key(root)?;
+            let mut container = convert_zone::template_container(root, &key)?;
+            container.signed = signed && container.signed;
+            let sealed = fastfile::seal(image, fastfile::VERSION_QA, &container)?;
+            // the sealed file must open again to the same image
+            let again = fastfile::open_bytes(&sealed, &key).context("reopening the sealed file")?;
+            if again.image != image {
+                bail!("the sealed file does not inflate to the converted image");
+            }
+            Ok(sealed)
+        }
+        other => write_iw_fastfile(other, image),
+    }
+}
+
 /// The hops from `from` to `to`, in order.
 pub fn route(from: Fmt, to: Fmt) -> Vec<(Fmt, Fmt)> {
     match (from, to) {
@@ -359,22 +380,7 @@ pub fn command(args: &[String]) -> Result<()> {
         bail!("nothing to convert");
     }
     if let Some(out) = out {
-        let bytes = match target {
-            Fmt::Codol => {
-                let root = folder.as_deref().unwrap();
-                let key = super::export::find_key(root)?;
-                let mut container = convert_zone::template_container(root, &key)?;
-                container.signed = signed && container.signed;
-                let sealed = fastfile::seal(&done.image, fastfile::VERSION_QA, &container)?;
-                // the sealed file must open again to the same image
-                let again = fastfile::open_bytes(&sealed, &key).context("reopening the sealed file")?;
-                if again.image != done.image {
-                    bail!("the sealed file does not inflate to the converted image");
-                }
-                sealed
-            }
-            other => write_iw_fastfile(other, &done.image)?,
-        };
+        let bytes = encode_fastfile(target, folder.as_deref(), &done.image, signed)?;
         std::fs::write(&out, &bytes).with_context(|| out.display().to_string())?;
         println!("{}: {} bytes", out.display(), bytes.len());
     }
