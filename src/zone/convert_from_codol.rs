@@ -51,7 +51,8 @@ fn material_info(c: &mut Conv, s: S, t: T) -> R {
 /// (the second one, loaded in the temporary block, aliases it); one that keeps data of its own is not merged and is reported.
 /// The map-entities record is loaded inside the map and gets an asset entry of its own, with the stages the QA map holds.
 fn clip_map(c: &mut Conv, s: S, t: T) -> R {
-    let ci = c.ssid("ClipInfo").ok_or("no ClipInfo in the source layout")?;
+    // 1.1.1.13 keeps the stock layout: nothing to gather
+    let Some(ci) = c.ssid("ClipInfo") else { return c.generic_members(s, t) };
     let info = c.ssub(s, "info").ok_or("a collision map without its ClipInfo")?;
     c.generic_members(s, t)?;
     let saved = c.svars[ci];
@@ -82,6 +83,14 @@ fn clip_map(c: &mut Conv, s: S, t: T) -> R {
                 let a = c.struct_array(sp, n, st, tt)?;
                 c.t_set_ptr(me, "stages", a);
                 c.t_set_i(me, "stageCount", n as i64);
+            }
+            // QA zones keep the trigger arrays in the map-entities record and the map's own words refer to them; a zone made from a stock
+            // one (`convert_clip.rs`) has them in the map only
+            if let (Some(tt), Some(ts)) = (c.t_sub(me, "trigger"), c.ssub(s, "trigger")) {
+                let empty = ["count", "hullCount", "slabCount"].iter().all(|m| c.t_get_i(tt, m) == 0);
+                if empty {
+                    c.generic(ts, tt)?;
+                }
             }
             c.add_top("MapEnts", hdr);
         }

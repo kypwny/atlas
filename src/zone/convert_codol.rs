@@ -37,7 +37,7 @@ pub fn schema(version: u32) -> &'static Schema {
 /// not read and check the ones it does.
 pub fn ext_sync(zone: &Zone, version: u32) -> Result<ExtSync, String> {
     let mut r = Replay::new(zone).map_err(|f| format!("the reference walker stops in the zone prefix: {} at {}", f.what, f.at))?;
-    let mut out = ExtSync { pos: Vec::with_capacity(zone.assets.len()), note: None };
+    let mut out = ExtSync { pos: Vec::with_capacity(zone.assets.len()), note: None, strict: version != 334 };
     for i in 0..zone.assets.len() {
         let e = zone.assets[i];
         if out.note.is_none() {
@@ -47,7 +47,6 @@ pub fn ext_sync(zone: &Zone, version: u32) -> Result<ExtSync, String> {
         }
         out.pos.push(if out.note.is_none() { Some(r.positions()) } else { None });
     }
-    let _ = version;
     Ok(out)
 }
 
@@ -863,6 +862,57 @@ mod tests {
             }
         }
         assert_eq!(a["structs"], orig["structs"]);
+    }
+
+    fn size_of(doc: &Value, m: &Value) -> i64 {
+        let mut n = match m["ty"].as_i64().filter(|&t| t >= 0) {
+            Some(t) => doc["structs"][t as usize]["s"].as_i64().unwrap(),
+            None => m["es"].as_i64().unwrap(),
+        };
+        for md in m["mods"].as_array().unwrap().iter().rev() {
+            n = if md[0] == "a" { n * md[1].as_i64().unwrap() } else { 4 };
+        }
+        n
+    }
+
+    fn struct_named<'a>(doc: &'a Value, name: &str) -> &'a Value {
+        doc["structs"].as_array().unwrap().iter().find(|s| s["n"] == name).unwrap()
+    }
+
+    /// The members of the structures the changes touch stay inside their structure and do not overlap.
+    #[test]
+    fn changed_structures_hold_their_members_without_overlap() {
+        for version in [334, 423, 461] {
+            let doc = build(version);
+            for name in [
+                "PhysPreset", "XModelSurfs", "XSurface", "XModel", "XModelLodInfo", "GfxImage", "MaterialTechniqueSet", "Material", "MaterialInfo", "snd_alias_t", "MssSound", "LoadedSound", "TracerDef", "FxElemDef",
+                "FxElemVisStateSample", "FxImpactEntry", "clipMap_t", "ClipInfo", "cmodel_t", "MapEnts", "GfxWorld", "GfxWorldDraw", "sunflare_t", "GfxCell", "GfxReflectionProbe", "GfxProbeList",
+            ] {
+                let Some(s) = doc["structs"].as_array().unwrap().iter().find(|s| s["n"] == name) else { continue };
+                let size = s["s"].as_i64().unwrap();
+                let mut spans: Vec<(i64, i64, String)> = s["m"].as_array().unwrap().iter().filter(|m| m["ign"] == 0).map(|m| (m["o"].as_i64().unwrap(), size_of(&doc, m), m["n"].as_str().unwrap().to_string())).collect();
+                spans.sort();
+                let mut end = 0;
+                for (o, n, m) in &spans {
+                    assert!(*o >= end || s["u"] == 1, "{version} {name}.{m} at {o} overlaps what ends at {end}");
+                    assert!(o + n <= size, "{version} {name}.{m} ends at {} behind the structure ({size})", o + n);
+                    end = end.max(o + n);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn structure_sizes_are_the_measured_ones() {
+        let (q, c) = (build(423), build(461));
+        for (name, qa, v319) in [("XModel", 360, 360), ("XSurface", 84, 84), ("XModelSurfs", 48, 48), ("Material", 104, 104), ("MaterialTechniqueSet", 208, 212), ("GfxImage", 52, 52), ("GfxWorld", 1608, 1612), ("clipMap_t", 256, 256), ("cmodel_t", 72, 72), ("snd_alias_t", 108, 108), ("FxElemDef", 260, 260), ("FxImpactEntry", 140, 156)] {
+            assert_eq!(struct_named(&q, name)["s"], qa, "{name}");
+            assert_eq!(struct_named(&c, name)["s"], v319, "{name} (3.19)");
+        }
+        let old = build(334);
+        for (name, size) in [("Material", 96), ("MaterialTechniqueSet", 204), ("GfxImage", 36), ("GfxWorld", 628), ("clipMap_t", 256), ("XModel", 360)] {
+            assert_eq!(struct_named(&old, name)["s"], size, "{name} (1.1.1.13)");
+        }
     }
 
     #[test]

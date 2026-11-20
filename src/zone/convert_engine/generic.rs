@@ -1584,6 +1584,8 @@ fn canonical_assets(heap: &Heap, top: &[(u32, u32, String)]) -> Vec<CanonAsset> 
         let o = (start - HEAP_BASE) as usize;
         (0..len / 4).map(|k| (4 * k, u32::from_le_bytes(heap.mem[o + 4 * k..o + 4 * k + 4].try_into().unwrap()))).collect()
     };
+    // only the words written as pointers are followed: a plain value (a hash, a float) can look like a heap address
+    let is_slot = |start: u32, at: usize| heap.slots.contains(&(start - HEAP_BASE + at as u32));
     let mut out = Vec::with_capacity(top.len());
     let want = std::env::var("ATLAS_CANON_DUMP").ok();
     for (ty, hdr, name) in top {
@@ -1607,7 +1609,10 @@ fn canonical_assets(heap: &Heap, top: &[(u32, u32, String)]) -> Vec<CanonAsset> 
                     continue;
                 }
                 stack.push((st, true));
-                for (_, w) in words(st, len) {
+                for (at, w) in words(st, len) {
+                    if !is_slot(st, at) {
+                        continue;
+                    }
                     if let Some((child, _, _)) = object(w) {
                         if child != st && (child == *hdr || !key.contains_key(&child)) && !state.contains_key(&child) {
                             stack.push((child, false));
@@ -1624,7 +1629,7 @@ fn canonical_assets(heap: &Heap, top: &[(u32, u32, String)]) -> Vec<CanonAsset> 
                 let o = (st - HEAP_BASE) as usize;
                 let ws = words(st, len);
                 for (at, w) in &ws {
-                    match object(*w) {
+                    match if is_slot(st, *at) { object(*w) } else { None } {
                         Some((child, _, interior)) => {
                             if child != *hdr && key.contains_key(&child) {
                                 fnv(&mut h, b"T");
@@ -1644,10 +1649,21 @@ fn canonical_assets(heap: &Heap, top: &[(u32, u32, String)]) -> Vec<CanonAsset> 
             }
             if dump {
                 let o = (st - HEAP_BASE) as usize;
-                let shown = len.min(96);
+                let shown = len.min(2048);
                 eprintln!("  object {:#x} len {len}: {}", st - HEAP_BASE, heap.mem[o..o + shown].iter().map(|b| format!("{b:02x}")).collect::<String>());
             }
             memo.insert(st, (h, len));
+        }
+        if dump {
+            // the root's pointer members: offset, hash and length of what each points at
+            if let Some((_, len, _)) = object(*hdr) {
+                for (at, w) in words(*hdr, len) {
+                    if let (true, Some((child, clen, interior))) = (is_slot(*hdr, at), object(w)) {
+                        let ch = if key.contains_key(&child) { key[&child] } else { memo.get(&child).map(|m| m.0).unwrap_or(0) };
+                        eprintln!("  member +{at}: object len {clen} interior {interior} hash {ch:016x}");
+                    }
+                }
+            }
         }
         let hash = memo.get(hdr).map(|m| m.0).unwrap_or(0);
         let bytes: usize = memo.values().map(|m| m.1).sum();

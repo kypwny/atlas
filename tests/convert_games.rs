@@ -85,3 +85,74 @@ fn call_of_duty_online_raw_files_reach_the_other_games() {
     assert_eq!(run(&p, Fmt::Iw3), 10);
     assert_eq!(run(&p, Fmt::Iw5), 10);
 }
+
+fn game319() -> Option<PathBuf> {
+    std::env::var_os("CODOL_TEST_319").map(PathBuf::from)
+}
+
+/// Converts a Call of Duty Online zone to stock MW2: the output is read by the stock schema walker (the command checks that itself).
+fn codol_to_mw2(folder: &PathBuf, zone: &str) -> Option<(usize, atlas::zone::convert_cli::Input)> {
+    let p = folder.join("client_shipRetail/chinese").join(format!("{zone}.ff"));
+    if !p.exists() {
+        return None;
+    }
+    let input = open_input(&p, Some(folder)).unwrap();
+    let (done, steps) = convert(input, Fmt::Iw4).unwrap();
+    Some((steps.last().map(|s| s.out.assets).unwrap(), done))
+}
+
+#[test]
+fn a_call_of_duty_online_loading_screen_converts_to_mw2() {
+    let Some(g) = game() else { return };
+    let Some((assets, _)) = codol_to_mw2(&g, "mp_nuked_load") else { return };
+    // two materials and a technique set (models, materials, images and technique sets are read with the Call of Duty Online
+    // schema), the raw file
+    assert_eq!(assets, 5);
+}
+
+#[test]
+fn a_call_of_duty_online_map_converts_to_mw2() {
+    let Some(g) = game() else { return };
+    let Some((assets, done)) = codol_to_mw2(&g, "mp_nuked") else { return };
+    // 416 entries in the zone: the collision map, the render world, models, materials, images, technique sets, sounds and effects
+    // come out as stock assets, and the map entities the collision map held inline become an asset of their own
+    assert!(assets > 400, "{assets}");
+    assert_eq!(done.fmt, Fmt::Iw4);
+    let zone = atlas::zone::schema_walk::ZoneImage { name: "x".into(), block_sizes: (0..8).map(|i| atlas::zone::u32_at(&done.image, 8 + 4 * i)).collect(), image: done.image.clone() };
+    let r = atlas::zone::schema_walk::walk(atlas::zone::schema_walk::Game::Iw4, &zone);
+    assert!(r.exact, "{:?}", r.mismatches);
+    // types in the stock zone that the Call of Duty Online one does not hold: the map entities are made from the collision map
+    assert!(r.assets.iter().any(|a| a.ty == 19), "map entities");
+    assert!(r.assets.iter().any(|a| a.ty == 21), "render world");
+    assert!(r.assets.iter().any(|a| a.ty == 15), "collision map");
+}
+
+#[test]
+fn a_call_of_duty_online_3_19_map_converts_to_mw2() {
+    let Some(g) = game319() else { return };
+    let p = g.join("client_shipRetail/chinese/mp_afghan.ff");
+    if !p.exists() {
+        return;
+    }
+    let input = open_input(&p, Some(&g)).unwrap();
+    assert_eq!(input.version, 461);
+    let (done, steps) = convert(input, Fmt::Iw4).unwrap();
+    assert_eq!(done.fmt, Fmt::Iw4);
+    assert!(steps.last().unwrap().out.assets > 200);
+}
+
+/// Stock MW2 -> Call of Duty Online -> stock MW2: the loading screen comes back asset for asset (content hash of every asset).
+#[test]
+fn a_stock_loading_screen_survives_the_round_trip_through_call_of_duty_online() {
+    let (Some(p), Some(g)) = (mw2("mp_rust_load"), game()) else { return };
+    let (qa, _) = convert(open_input(&p, None).unwrap(), Fmt::Codol).unwrap();
+    let _ = g;
+    let first = atlas::zone::convert_engine::Rules { canon: true, ..Default::default() };
+    let orig = atlas::zone::convert_cli::engine_hop(atlas::zone::schema_walk::Game::Iw4, atlas::zone::schema_walk::Game::Iw4, first, &open_input(&p, None).unwrap()).unwrap();
+    let back = atlas::zone::convert_from_codol::codol_to_iw4_with(&qa, true).unwrap();
+    let mut a: Vec<_> = orig.canon.iter().map(|c| (c.ty, c.name.clone(), c.hash)).collect();
+    let mut b: Vec<_> = back.canon.iter().map(|c| (c.ty, c.name.clone(), c.hash)).collect();
+    a.sort();
+    b.sort();
+    assert_eq!(a, b);
+}

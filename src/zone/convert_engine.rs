@@ -2180,7 +2180,7 @@ impl<'a> Walker<'a> {
                 if ext && self.pos != start + extent {
                     return fail(format!("asset {i} (type {ty}) ended at {:#x} but its extent ends at {:#x}", self.pos, start + extent));
                 }
-                if ext {
+                if ext && self.sync.strict {
                     if let Some(p) = self.sync.pos.get(i).copied().flatten() {
                         for b in 0..self.s.blocks.len().min(8) {
                             if self.kind(b) != 0 && self.off[b] != p[b] {
@@ -2234,11 +2234,13 @@ pub struct Heap {
     blobs: HashMap<u32, Vec<u8>>,
     /// An object did not fit the address window.
     pub overflow: bool,
+    /// Heap offsets of the words written with `set_ptr` (pointer slots), for the content hash of converted assets.
+    slots: std::collections::HashSet<u32>,
 }
 
 impl Heap {
     pub fn new(psz: usize) -> Heap {
-        Heap { mem: vec![0; 16], starts: Vec::new(), lens: Vec::new(), psz, blobs: HashMap::new(), overflow: false }
+        Heap { mem: vec![0; 16], starts: Vec::new(), lens: Vec::new(), psz, blobs: HashMap::new(), overflow: false, slots: Default::default() }
     }
 
     /// A zeroed object of `size` bytes.
@@ -2334,6 +2336,9 @@ impl Heap {
         b[..4].copy_from_slice(&v.to_le_bytes());
         let n = self.psz;
         self.put(addr, &b[..n]);
+        if v != 0 && addr >= HEAP_BASE {
+            self.slots.insert(addr - HEAP_BASE);
+        }
     }
 
     pub fn ptr(&self, addr: u32) -> u32 {
@@ -2420,6 +2425,9 @@ pub struct ExtSync {
     /// Why the positions stop short (the reference loader failed on an entry): from there on only the entries the schema reads can
     /// be walked, and their block positions are not checked.
     pub note: Option<String>,
+    /// Whether the positions are held against the engine's after every entry it reads (the reference loader is not exact for every
+    /// build).
+    pub strict: bool,
 }
 
 /// `walk_entries` for any schema (`label` names the game in messages).
