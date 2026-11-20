@@ -20,6 +20,13 @@ jobs:
           rustup default stable
           rustup target add i686-pc-windows-msvc
 
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            tools/ifs_helper
+
       - name: Tests (no game data needed)
         run: cargo test --release
 
