@@ -1568,7 +1568,7 @@ impl Conv {
                         st.0 += 1;
                         top.push(TopAsset { ty: tty, ptr, id: rec.id });
                     }
-                    None => *st.1.entry("no asset type for it in the target game".to_string()).or_default() += 1,
+                    None => *st.1.entry("not an asset in the target game (kept inside other assets there)".to_string()).or_default() += 1,
                 }
             }
             None => {

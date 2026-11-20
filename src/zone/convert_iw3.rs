@@ -272,9 +272,57 @@ fn string_table_to_iw3(c: &mut Conv, s: S, t: T) -> R {
     Ok(())
 }
 
+/// MW2 added two effect element types (spark cloud and spark fountain) after the cloud: CoD4's model, lights, sound, decal and runner
+/// are two higher there.
+fn elem_type_to_iw4(t: i64) -> i64 {
+    if t >= 5 { t + 2 } else { t }
+}
+
+fn elem_type_to_iw3(t: i64) -> i64 {
+    match t {
+        5 | 6 => 4,
+        t if t >= 7 => t - 2,
+        t => t,
+    }
+}
+
+fn elem_def_to_iw4(c: &mut Conv, s: S, t: T) -> R {
+    let ty = c.si(s, "elemType");
+    c.t_set_i(t, "elemType", elem_type_to_iw4(ty));
+    c.generic_members_except(s, t, &["elemType"])?;
+    let (min, max) = (c.s_at(s, "collMins"), c.s_at(s, "collMaxs"));
+    corners_to_bounds(c, t, "bounds", min, max);
+    // a trail's definition lives in the extended member
+    let trail = c.sp(s, "trailDef");
+    if let (true, Some(ext), Some(sk), Some(tk)) = (trail != 0, c.t_sub(t, "extended"), c.ssid("FxTrailDef"), c.tsid("FxTrailDef")) {
+        let a = c.heap.alloc(c.tsize(tk) as usize, 4);
+        c.generic(S { sid: sk, addr: trail }, T { sid: tk, addr: a })?;
+        c.t_set_ptr(ext, "trailDef", a);
+    }
+    Ok(())
+}
+
+fn elem_def_to_iw3(c: &mut Conv, s: S, t: T) -> R {
+    let ty = c.si(s, "elemType");
+    c.t_set_i(t, "elemType", elem_type_to_iw3(ty));
+    c.generic_members_except(s, t, &["elemType"])?;
+    let (min, max) = (c.t_at(t, "collMins"), c.t_at(t, "collMaxs"));
+    bounds_to_corners(c, s, "bounds", min, max);
+    if let (Some(ext), Some(sk), Some(tk)) = (c.ssub(s, "extended"), c.ssid("FxTrailDef"), c.tsid("FxTrailDef")) {
+        let trail = c.sp(ext, "trailDef");
+        if trail != 0 && ty == 3 {
+            let a = c.heap.alloc(c.tsize(tk) as usize, 4);
+            c.generic(S { sid: sk, addr: trail }, T { sid: tk, addr: a })?;
+            c.t_set_ptr(t, "trailDef", a);
+        }
+    }
+    Ok(())
+}
+
 pub fn rules_to_iw4() -> Rules {
     let mut r = Rules::default();
     r.replace.insert("XModel".to_string(), model_to_iw4);
+    r.replace.insert("FxElemDef".to_string(), elem_def_to_iw4);
     r.replace.insert("XBoneInfo".to_string(), bone_info_to_iw4);
     r.replace.insert("GfxBrushModel".to_string(), brush_model_to_iw4);
     r.replace.insert("cStaticModel_s".to_string(), static_model_to_iw4);
@@ -289,6 +337,7 @@ pub fn rules_to_iw4() -> Rules {
 pub fn rules_from_iw4() -> Rules {
     let mut r = Rules::default();
     r.replace.insert("XModel".to_string(), model_to_iw3);
+    r.replace.insert("FxElemDef".to_string(), elem_def_to_iw3);
     r.replace.insert("XBoneInfo".to_string(), bone_info_to_iw3);
     r.replace.insert("GfxBrushModel".to_string(), brush_model_to_iw3);
     r.replace.insert("cStaticModel_s".to_string(), static_model_to_iw3);
