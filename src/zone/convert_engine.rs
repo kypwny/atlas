@@ -2147,7 +2147,9 @@ impl<'a> Walker<'a> {
                                         }
                                     }
                                 }
-                                None => return fail(format!("asset {i} (type {ty}) has no loader in this layout and no block positions were given for it")),
+                                None => {
+                                    return fail(format!("asset {i} (type {ty}) has no loader in this layout and no block positions: {}", self.sync.note.clone().unwrap_or_default()));
+                                }
                             }
                         }
                     }
@@ -2415,6 +2417,9 @@ pub fn walk_entries<'a>(game: Game, zone: &'a ZoneImage, cb: &mut dyn FnMut(&Wal
 #[derive(Default, Clone)]
 pub struct ExtSync {
     pub pos: Vec<Option<[usize; 8]>>,
+    /// Why the positions stop short (the reference loader failed on an entry): from there on only the entries the schema reads can
+    /// be walked, and their block positions are not checked.
+    pub note: Option<String>,
 }
 
 /// `walk_entries` for any schema (`label` names the game in messages).

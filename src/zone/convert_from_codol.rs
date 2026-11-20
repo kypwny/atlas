@@ -45,11 +45,56 @@ fn material_info(c: &mut Conv, s: S, t: T) -> R {
     c.generic_members_except(s, t, &["sortKey"])
 }
 
+/// The collision map. The QA map keeps the arrays of its brush model in a `ClipInfo` (planes, materials, brush sides and edges,
+/// leaf-brush nodes and leaf brushes, brushes with their bounds and contents) and the stock map has them as its own members, so the
+/// members of the `ClipInfo` convert into the map by name. Every collision model of the maps measured points at that same `ClipInfo`
+/// (the second one, loaded in the temporary block, aliases it); one that keeps data of its own is not merged and is reported.
+/// The map-entities record is loaded inside the map and gets an asset entry of its own, with the stages the QA map holds.
+fn clip_map(c: &mut Conv, s: S, t: T) -> R {
+    let ci = c.ssid("ClipInfo").ok_or("no ClipInfo in the source layout")?;
+    let info = c.ssub(s, "info").ok_or("a collision map without its ClipInfo")?;
+    c.generic_members(s, t)?;
+    let saved = c.svars[ci];
+    c.svars[ci] = info.addr;
+    let r = c.generic_members(info, t);
+    c.svars[ci] = saved;
+    r?;
+    // collision models with data of their own
+    let names = ["planes", "materials", "brushsides", "brushEdges", "leafbrushNodes", "leafbrushes", "brushes", "brushBounds", "brushContents"];
+    for i in 0..c.si(s, "numSubModels").max(0) as usize {
+        let Some(m) = c.s_elem(s, "cmodels", i) else { break };
+        let ip = c.sp(m, "info");
+        if ip != 0 && ip != info.addr {
+            let p = S { sid: ci, addr: ip };
+            if names.iter().any(|n| c.sp(p, n) != c.sp(info, n) && c.sp(p, n) != 0) {
+                c.warn("a collision model keeps brush data of its own (not merged into the map's arrays)".to_string());
+                break;
+            }
+        }
+    }
+    // the map entities: the stages (a member of the map here) and the trigger arrays
+    if let (Some(id), Some(me_t)) = (c.s_asset_id(s, "mapEnts"), c.tsid("MapEnts")) {
+        if let Some(hdr) = c.asset_ref(id) {
+            let me = T { sid: me_t, addr: hdr };
+            let n = c.si(s, "stageCount").max(0) as usize;
+            let sp = c.sp(s, "stages");
+            if let (true, Some(st), Some(tt)) = (n > 0 && sp != 0, c.ssid("Stage"), c.tsid("Stage")) {
+                let a = c.struct_array(sp, n, st, tt)?;
+                c.t_set_ptr(me, "stages", a);
+                c.t_set_i(me, "stageCount", n as i64);
+            }
+            c.add_top("MapEnts", hdr);
+        }
+    }
+    Ok(())
+}
+
 /// The rules of the conversion: what differs in value (not only in layout) between the two games.
 pub fn rules() -> Rules {
     let mut r = Rules::default();
     r.replace.insert("FxElemDef".to_string(), elem_def);
     r.replace.insert("MaterialInfo".to_string(), material_info);
+    r.replace.insert("clipMap_t".to_string(), clip_map);
     r
 }
 
@@ -58,7 +103,11 @@ pub fn codol_to_iw4(input: &Input) -> Result<HopOut> {
     let zone = Zone::from_image(input.version, input.image.clone())?;
     let sync = convert_codol::ext_sync(&zone, input.version).map_err(|e| anyhow!(e))?;
     let source = convert_codol::schema(input.version);
-    let out = ce::convert_zone_s(Game::Iw4, source, &input.zone_image(), sync, Game::Iw4, rules()).map_err(|e| anyhow!(e))?;
+    let note = sync.note.clone();
+    let mut out = ce::convert_zone_s(Game::Iw4, source, &input.zone_image(), sync, Game::Iw4, rules()).map_err(|e| anyhow!(e))?;
+    if let Some(n) = note {
+        *out.warnings.entry(format!("block positions are not checked from there on: {n}")).or_default() += 1;
+    }
     let stats = out.stats.into_iter().map(|(ty, (converted, left_out))| (ty, TypeStat { converted, left_out })).collect();
     Ok(HopOut { image: out.image, stats, nulled: out.nulled, warnings: out.warnings, assets: out.assets })
 }

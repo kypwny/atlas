@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// Asset types read with the schema; every other type of a zone is stepped over by its directory extent.
-const READ: &[u32] = &[0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 20, 22, 24, 27, 30, 31, 36, 37, 40];
+const READ: &[u32] = &[0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 20, 22, 24, 27, 30, 31, 36, 37, 40];
 
 /// The schema for a Call of Duty Online fastfile version (334, 423 or 461).
 pub fn schema(version: u32) -> &'static Schema {
@@ -36,14 +36,18 @@ pub fn schema(version: u32) -> &'static Schema {
 /// Block positions after each directory entry, from the reference walker (`Replay`): they stand in for the entries the schema does
 /// not read and check the ones it does.
 pub fn ext_sync(zone: &Zone, version: u32) -> Result<ExtSync, String> {
-    let s = schema(version);
     let mut r = Replay::new(zone).map_err(|f| format!("the reference walker stops in the zone prefix: {} at {}", f.what, f.at))?;
-    let mut out = ExtSync { pos: Vec::with_capacity(zone.assets.len()) };
+    let mut out = ExtSync { pos: Vec::with_capacity(zone.assets.len()), note: None };
     for i in 0..zone.assets.len() {
         let e = zone.assets[i];
-        r.replay_asset(zone, i).map_err(|f| format!("the reference walker stops at asset {i} (type {}, extent {}): {} at {:#x}", e.asset_type, e.extent, f.what, f.at))?;
-        out.pos.push(Some(r.positions()));
+        if out.note.is_none() {
+            if let Err(f) = r.replay_asset(zone, i) {
+                out.note = Some(format!("the reference walker stops at asset {i} (type {}, extent {}): {} at {:#x}", e.asset_type, e.extent, f.what, f.at));
+            }
+        }
+        out.pos.push(if out.note.is_none() { Some(r.positions()) } else { None });
     }
+    let _ = version;
     Ok(out)
 }
 
@@ -64,6 +68,11 @@ pub fn replay_trace(args: &[String]) -> anyhow::Result<()> {
     r.enable_tracing();
     for i in 0..=index.min(zone.assets.len() - 1) {
         r.replay_asset(&zone, i).map_err(|f| anyhow::anyhow!("asset {i}: {} at {:#x}", f.what, f.at))?;
+    }
+    if let (Some(at), Some(n)) = (args.get(3), args.get(4)) {
+        let at = usize::from_str_radix(at.trim_start_matches("0x"), 16)?;
+        let n: usize = n.parse()?;
+        println!("words at {at:#x}: {:x?}", (0..n).map(|k| super::u32_at(&zone.data, at + 4 * k)).collect::<Vec<_>>());
     }
     println!("positions {:?}
 peaks     {:?}
@@ -285,6 +294,74 @@ impl Doc {
         self.member(s, m)["c"] = out;
     }
 
+    /// Appends a new structure and returns its index.
+    fn new_struct(&mut self, name: &str, size: i64, align: i64) -> usize {
+        let list = self.v["structs"].as_array_mut().unwrap();
+        list.push(json!({"n": name, "u": 0, "s": size, "a": align, "leaf": 0, "asset": "", "blk": null, "aa": null, "dynoff": -1, "dyn": 0, "m": []}));
+        list.len() - 1
+    }
+
+    /// Copies member `m` of structure `from` into structure `to` at `off` (appended; `order` sorts later). The counts of the copy that
+    /// read members of `from` read the copies in `to` made before it (`map` holds the old and new ids).
+    fn copy_member(&mut self, from: &str, m: &str, to: &str, off: i64, map: &mut HashMap<u64, u64>) {
+        let (fs, ts) = (self.sid(from), self.sid(to));
+        let mut c = self.member(from, m).clone();
+        let old = c["_id"].as_u64().unwrap();
+        let new = self.next_id();
+        c["_id"] = json!(new);
+        c["o"] = json!(off);
+        fn retarget(x: &mut Value, fs: usize, ts: usize, map: &HashMap<u64, u64>) {
+            if let Value::Array(a) = x {
+                if a.len() == 7 && a[0] == "d" && a[1].as_u64() == Some(fs as u64) {
+                    a[1] = json!(ts);
+                    if let Some(r) = a[2].as_array_mut().and_then(|r| r.first_mut()).and_then(|r| r.as_array_mut()) {
+                        if r[0] == "@" {
+                            let id = r[1].as_u64().unwrap();
+                            r[1] = json!(map.get(&id).copied().unwrap_or(id));
+                        }
+                    }
+                }
+                for e in a.iter_mut() {
+                    retarget(e, fs, ts, map);
+                }
+            }
+        }
+        retarget(&mut c["mods"], fs, ts, map);
+        retarget(&mut c["c"], fs, ts, map);
+        map.insert(old, new);
+        self.members(to).push(c);
+    }
+
+    /// Removes the named members from a structure.
+    fn drop_all(&mut self, s: &str, names: &[&str]) {
+        for n in names {
+            self.drop(s, n);
+        }
+    }
+
+    /// Puts the members in the given order (the loader's order); every member must be named.
+    fn order(&mut self, s: &str, names: &[&str]) {
+        let list = self.members(s);
+        let mut out = Vec::new();
+        for n in names {
+            let at = list.iter().position(|m| m["n"] == *n).unwrap_or_else(|| panic!("no member {s}.{n}"));
+            out.push(list.remove(at));
+        }
+        assert!(list.is_empty(), "members of {s} not in the order: {:?}", list.iter().map(|m| m["n"].clone()).collect::<Vec<_>>());
+        *list = out;
+    }
+
+    /// Points a member's structure type at another structure.
+    fn retype(&mut self, s: &str, m: &str, target: &str) {
+        let t = self.sid(target);
+        let (size, align) = (self.v["structs"][t]["s"].clone(), self.v["structs"][t]["a"].clone());
+        let mem = self.member(s, m);
+        mem["ty"] = json!(t);
+        mem["tk"] = json!(target);
+        mem["es"] = size;
+        mem["ea"] = align;
+    }
+
     fn next_id(&self) -> u64 {
         self.v["structs"].as_array().unwrap().iter().flat_map(|s| s["m"].as_array().unwrap().iter()).filter_map(|m| m["_id"].as_u64()).max().unwrap_or(0) + 1
     }
@@ -348,7 +425,7 @@ fn build(version: u32) -> Value {
 }
 
 /// QA 3.3.3.3 (423) and 3.19 (461).
-fn qa_changes(d: &mut Doc, _version: u32) {
+fn qa_changes(d: &mut Doc, version: u32) {
     // PhysPreset: 68 bytes in the IW5 layout. Six scaling members after the first ten (all zero unless the preset names a sound
     // prefix, then 250, 250, 1, 1, 0, 0: 23 of 23 presets with a prefix), the two flag bytes behind them (convert_model.rs).
     d.mv("PhysPreset", "tempDefaultToCylinder", 64);
@@ -432,6 +509,23 @@ fn qa_changes(d: &mut Doc, _version: u32) {
     d.set_size("MaterialInfo", 32);
     d.shift("Material", 24, 8);
 
+    if version == 461 {
+        // 3.19 impact records have four more surface types: 35 non-flesh references and 4 flesh ones (156 bytes; measured on the
+        // impact table of `common_mp`: 2,973 bytes = 8 + name + 19 x 156).
+        d.arr("FxImpactEntry", "nonflesh", 35);
+        d.mv("FxImpactEntry", "flesh", 140);
+        d.set_size("FxImpactEntry", 156);
+        // 3.19: one more technique slot (the technique set is 212 bytes), one more state-bits entry (the counts and flags behind the
+        // entries sit one byte later; the header stays 104 bytes) (replay.rs: `technique_set`, `material`).
+        d.arr("MaterialTechniqueSet", "techniques", 49);
+        d.set_size("MaterialTechniqueSet", 212);
+        d.arr("Material", "stateBitsEntry", 49);
+        for m in ["textureCount", "constantCount", "stateBitsCount", "stateFlags", "cameraRegion"] {
+            let o = d.off("Material", m);
+            d.mv("Material", m, o + 1);
+        }
+    }
+
     // snd_alias_t 100 -> 108: two words after the flags (+60: 50 in 10,089 of 10,768 aliases; +64: nearly always 0), everything
     // behind them eight bytes up (convert_sound.rs).
     d.shift("snd_alias_t", 60, 8);
@@ -452,6 +546,8 @@ fn qa_changes(d: &mut Doc, _version: u32) {
 
     // FxElemDef 252 -> 260: a word at +252 and a string at +256 (loaded after the extended definition). The element types are
     // numbered as in IW4 plus none or two from the trail on, and two new types sit at 2 and 4 (sprites that use a material).
+    clip_map(d);
+
     d.set_size("FxElemDef", 260);
     d.add_scalar("FxElemDef", "unknown252", 252, "u32");
     d.add_like("FxElemDef", "name256", 256, "FxEffectDefRef", "name", Some("extended"));
@@ -466,6 +562,111 @@ fn qa_changes(d: &mut Doc, _version: u32) {
     // FxElemVisStateSample 48 -> 64: each visual state is followed by two words
     d.set_size("FxElemVisStateSample", 64);
     d.mv("FxElemVisStateSample", "amplitude", 32);
+}
+
+/// The collision map (type 15): laid out like IW5's `clipMap_t` (convert_clip.rs, replay_world.rs `collision_qa`). The arrays a brush
+/// model needs live in a 64-byte `ClipInfo` at +8 (planes, materials, brush sides, brush edges, leaf-brush nodes, leaf brushes,
+/// brushes, their bounds and contents), a second one is behind a pointer at +72 (loaded in the temporary block), and every collision
+/// model (72 bytes) has one behind a pointer at +28. The trigger arrays and the stages of the map entities are members of the map, and
+/// the map-entities record in the stream is 36 bytes (its trigger part is empty).
+fn clip_map(d: &mut Doc) {
+    // the ClipInfo members, in the order the loader reads them
+    d.new_struct("ClipInfo", 64, 4);
+    let mut map = HashMap::new();
+    for (m, off) in [
+        ("planeCount", 0),
+        ("planes", 4),
+        ("numMaterials", 8),
+        ("materials", 12),
+        ("numBrushSides", 16),
+        ("brushsides", 20),
+        ("numBrushEdges", 24),
+        ("brushEdges", 28),
+        ("leafbrushNodesCount", 32),
+        ("leafbrushNodes", 36),
+        ("numLeafBrushes", 40),
+        ("leafbrushes", 44),
+        ("numBrushes", 48),
+        ("brushes", 52),
+        ("brushBounds", 56),
+        ("brushContents", 60),
+    ] {
+        d.copy_member("clipMap_t", m, "ClipInfo", off, &mut map);
+        // the reference walker loads each array only when its pointer is -1; any other value refers to data loaded before
+        if !m.starts_with("num") && !m.ends_with("Count") {
+            d.member("ClipInfo", m)["re"] = json!(1);
+        }
+    }
+    d.drop_all(
+        "clipMap_t",
+        &["planeCount", "planes", "numMaterials", "materials", "numBrushSides", "brushsides", "numBrushEdges", "brushEdges", "leafbrushNodesCount", "leafbrushNodes", "numLeafBrushes", "leafbrushes", "numBrushes", "brushes", "brushBounds", "brushContents", "numLeafSurfaces", "leafsurfaces"],
+    );
+    // the stages and triggers move here from the map entities
+    let mut stage_map = HashMap::new();
+    d.copy_member("MapEnts", "stageCount", "clipMap_t", 160, &mut stage_map);
+    d.copy_member("MapEnts", "stages", "clipMap_t", 156, &mut stage_map);
+    let mut trig_map = HashMap::new();
+    d.copy_member("MapEnts", "trigger", "clipMap_t", 164, &mut trig_map);
+    d.drop_all("MapEnts", &["stages", "stageCount"]);
+    // the trigger arrays are inline in the map-entities record; the map's own trigger words refer to them
+    for m in ["models", "hulls", "slabs"] {
+        d.member("MapTriggers", m)["re"] = json!(1);
+    }
+    d.set_size("MapEnts", 36);
+    // the new members of the map and of the collision models
+    d.add_like("clipMap_t", "info", 8, "MapEnts", "trigger", None);
+    d.retype("clipMap_t", "info", "ClipInfo");
+    d.add_like("clipMap_t", "pInfo", 72, "XModelLodInfo", "modelSurfs", None);
+    d.retype("clipMap_t", "pInfo", "ClipInfo");
+    d.add_like("cmodel_t", "info", 28, "XModelLodInfo", "modelSurfs", None);
+    d.retype("cmodel_t", "info", "ClipInfo");
+    d.mv("cmodel_t", "leaf", 32);
+    d.set_size("cmodel_t", 72);
+    let cm = d.sid("cmodel_t");
+    d.v["structs"][cm]["leaf"] = json!(0);
+    for (m, off) in [
+        ("isInUse", 4),
+        ("numStaticModels", 76),
+        ("staticModelList", 80),
+        ("numNodes", 84),
+        ("nodes", 88),
+        ("numLeafs", 92),
+        ("leafs", 96),
+        ("vertCount", 100),
+        ("verts", 104),
+        ("triCount", 108),
+        ("triIndices", 112),
+        ("triEdgeIsWalkable", 116),
+        ("borderCount", 120),
+        ("borders", 124),
+        ("partitionCount", 128),
+        ("partitions", 132),
+        ("aabbTreeCount", 136),
+        ("aabbTrees", 140),
+        ("numSubModels", 144),
+        ("cmodels", 148),
+        ("mapEnts", 152),
+        ("smodelNodeCount", 188),
+        ("smodelNodes", 192),
+        ("dynEntCount", 196),
+        ("dynEntDefList", 200),
+        ("dynEntPoseList", 208),
+        ("dynEntClientList", 216),
+        ("dynEntCollList", 224),
+        ("checksum", 232),
+        ("padding", 236),
+    ] {
+        d.mv("clipMap_t", m, off);
+    }
+    d.arr("clipMap_t", "padding", 20);
+    d.order(
+        "clipMap_t",
+        &[
+            "name", "isInUse", "info", "pInfo", "numStaticModels", "staticModelList", "numNodes", "nodes", "numLeafs", "leafs", "vertCount", "verts", "triCount", "triIndices", "triEdgeIsWalkable", "borderCount", "borders",
+            "partitionCount", "partitions", "aabbTreeCount", "aabbTrees", "numSubModels", "cmodels", "smodelNodeCount", "smodelNodes", "mapEnts", "stageCount", "stages", "trigger", "dynEntCount", "dynEntDefList", "dynEntPoseList",
+            "dynEntClientList", "dynEntCollList", "checksum", "padding",
+        ],
+    );
 }
 
 #[cfg(test)]

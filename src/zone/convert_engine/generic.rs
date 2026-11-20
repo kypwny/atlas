@@ -240,6 +240,8 @@ pub struct Conv {
     pub assets: HashMap<u32, Option<u32>>,
     /// Target header -> the heap headers of the assets it references (for ordering).
     pub deps: HashMap<u32, Vec<u32>>,
+    /// Converted assets a rule wants as entries of the target asset list although the source has none (type, heap header).
+    extra_top: Vec<(u32, u32)>,
     dep_stack: Vec<Vec<u32>>,
     by_id: HashMap<u32, usize>,
     dummy: u32,
@@ -282,6 +284,7 @@ impl Conv {
             regions: BTreeMap::new(),
             assets: HashMap::new(),
             deps: HashMap::new(),
+            extra_top: Vec::new(),
             dep_stack: Vec::new(),
             by_id: HashMap::new(),
             dummy: 0,
@@ -1415,6 +1418,15 @@ impl Conv {
 
     // ---------------------------------------------------------------- assets
     /// The target header an asset (by source id) became, converting it now when that has not happened; also notes the dependency.
+    /// Makes the converted asset at heap header `hdr` (of the target structure `structure`) an entry of the target asset list.
+    pub fn add_top(&mut self, structure: &str, hdr: u32) {
+        let Some(&sid) = self.ts.by_name.get(structure) else { return };
+        let Some(ty) = self.ts.assets.iter().filter(|e| *e.1 == sid).map(|e| *e.0).min() else { return };
+        if !self.extra_top.iter().any(|e| e.1 == hdr) {
+            self.extra_top.push((ty, hdr));
+        }
+    }
+
     pub fn asset_ref(&mut self, id: u32) -> Option<u32> {
         let r = self.convert_asset(id);
         if let (Some(a), Some(d)) = (r, self.dep_stack.last_mut()) {
@@ -1557,7 +1569,8 @@ impl Conv {
         let Some(rec) = self.events.iter().rev().find(|e| e.top == i && w.top_slots.contains(&e.slot)).cloned() else {
             if let Some(a) = w.assets.get(i).filter(|a| a.skipped) {
                 // an entry stepped over by its extent: no loader for it in the source layout
-                let why = format!("{} is not read from Call of Duty Online (no layout for it here)", self.ss.asset_names.get(a.ty as usize).map(|n| n.as_str()).unwrap_or("this asset type"));
+                let name = self.ss.asset_names.get(a.ty as usize).map(|n| n.trim_start_matches("ASSET_TYPE_").to_ascii_lowercase()).unwrap_or_else(|| "this asset type".to_string());
+                let why = if a.end == a.start { format!("{name} has no data in Call of Duty Online zones") } else { format!("{name} is not read from Call of Duty Online (no layout for it here)") };
                 *stats.entry(a.ty).or_default().1.entry(why).or_default() += 1;
             }
             self.w_ptr = std::ptr::null();
@@ -1610,6 +1623,11 @@ pub fn convert_zone_s(game: Game, source: &'static Schema, zone: &ZoneImage, syn
             c.convert_entry(w, i, &mut top, &mut stats);
         };
         walk_entries_s(source, game, zone, sync, &mut cb)?;
+    }
+    for (ty, ptr) in std::mem::take(&mut c.extra_top) {
+        if !top.iter().any(|t| t.ptr == ptr) {
+            top.push(TopAsset { ty, ptr, id: 0 });
+        }
     }
     if c.heap.overflow {
         return Err("the converted structures do not fit the address window of the heap (or a count is far too large)".to_string());
