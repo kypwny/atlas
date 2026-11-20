@@ -1,0 +1,49 @@
+// Loading rules for NX1 that loader_rules.py cannot translate (written from the build's own loader functions, after NX1_Rules.txt).
+// The rule language is the one of gen_zone_schema.py; a later statement replaces an earlier one for the same member.
+
+// ----- raw files: the compressed length when there is one, else the length plus the terminator
+use RawFile;
+set count buffer ( compressedLen + ( ( compressedLen == 0 ) * ( len + 1 ) ) );
+
+// ----- materials
+use MaterialTechnique;
+set arraysize passArray passCount;
+reorder: passArray name;
+
+// the literal constants of a shader argument (four floats) exist for the argument types 1 and 7; the others are plain values
+use MaterialArgumentDef;
+set reusable literalConst;
+set count literalConst 4;
+set allocalign literalConst 4;
+set condition literalConst ( MaterialShaderArgument::type == 1 ) || ( MaterialShaderArgument::type == 7 );
+
+// a texture is an image, or a water simulation for semantic 11
+use MaterialTextureDefInfo;
+set condition image MaterialTextureDef::m_semantic != 11;
+set condition water MaterialTextureDef::m_semantic == 11;
+set reusable water;
+set allocalign water 4;
+
+use MaterialVertexShaderProgram;
+set condition vs never;
+set condition loadDef always;
+reorder: loadDef;
+
+use MaterialPixelShaderProgram;
+set condition ps never;
+set condition loadDef always;
+reorder: loadDef;
+
+// ----- images: the pixels are in the physical block
+use GfxImage;
+set count pixels cardMemory::platform;
+set allocalign pixels 4096;
+set block pixels XFILE_BLOCK_PHYSICAL;
+
+// ----- surfaces of models
+use XSurface;
+set reusable verts0;
+set count verts0 vertCount;
+set allocalign verts0 16;
+set condition p_stream0 never;
+reorder: vertInfo verts0 vertList triIndices;

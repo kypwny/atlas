@@ -29,6 +29,8 @@ pub mod t6_files;
 pub mod t6_rebuild;
 pub mod t6_write;
 pub mod t6_world;
+pub mod nx1;
+pub mod nx1_walk;
 pub mod schema_walk;
 pub mod world;
 pub mod writer;
