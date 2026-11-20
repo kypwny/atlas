@@ -431,3 +431,34 @@ fn collect(p: &Path, out: &mut Vec<PathBuf>) {
         out.push(p.to_path_buf());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_conversion_goes_through_iw4() {
+        assert_eq!(route(Fmt::Iw4, Fmt::Codol), vec![(Fmt::Iw4, Fmt::Codol)]);
+        assert_eq!(route(Fmt::Iw3, Fmt::Iw5), vec![(Fmt::Iw3, Fmt::Iw4), (Fmt::Iw4, Fmt::Iw5)]);
+        assert_eq!(route(Fmt::Codol, Fmt::Iw3), vec![(Fmt::Codol, Fmt::Iw4), (Fmt::Iw4, Fmt::Iw3)]);
+        assert_eq!(route(Fmt::Iw5, Fmt::Iw4), vec![(Fmt::Iw5, Fmt::Iw4)]);
+    }
+
+    #[test]
+    fn games_are_named_by_either_name() {
+        assert_eq!(Fmt::parse("cod4"), Some(Fmt::Iw3));
+        assert_eq!(Fmt::parse("MW3"), Some(Fmt::Iw5));
+        assert_eq!(Fmt::parse("qa"), Some(Fmt::Codol));
+        assert_eq!(Fmt::parse("t6"), None);
+    }
+
+    #[test]
+    fn every_hop_to_and_from_iw4_exists() {
+        for f in [Fmt::Iw3, Fmt::Iw5, Fmt::Codol] {
+            assert!(hop(Fmt::Iw4, f).is_some(), "iw4 -> {}", f.name());
+        }
+        for f in [Fmt::Iw3, Fmt::Iw5, Fmt::Codol] {
+            assert!(hop(f, Fmt::Iw4).is_some(), "{} -> iw4", f.name());
+        }
+    }
+}

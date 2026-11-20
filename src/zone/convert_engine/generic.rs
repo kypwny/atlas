@@ -227,6 +227,14 @@ pub struct Conv {
     pub rules: Rules,
     cache: HashMap<(u32, usize, usize), u32>,
     temp_keys: Vec<u32>,
+    skip_members: Vec<(usize, &'static str)>,
+    /// Rule state: converted data by source asset id (heap address, count).
+    pub user: HashMap<u32, (u32, u32)>,
+    /// Converted data of reusable temporary-block pointers, by (insert slot, target structure).
+    persist: HashMap<(u32, usize), u32>,
+    /// Target structure of each converted asset header, and assets made from embedded structures, by (structure, name).
+    asset_struct: HashMap<u32, usize>,
+    named_assets: HashMap<(usize, Vec<u8>), u32>,
     regions: BTreeMap<u32, Region>,
     /// Source asset id -> target header (None: left out).
     pub assets: HashMap<u32, Option<u32>>,
@@ -264,6 +272,11 @@ impl Conv {
             rules,
             cache: HashMap::new(),
             temp_keys: Vec::new(),
+            skip_members: Vec::new(),
+            user: HashMap::new(),
+            persist: HashMap::new(),
+            asset_struct: HashMap::new(),
+            named_assets: HashMap::new(),
             regions: BTreeMap::new(),
             assets: HashMap::new(),
             deps: HashMap::new(),
@@ -487,6 +500,94 @@ impl Conv {
         (base != 0).then_some(T { sid: ty, addr: base + i as u32 * size })
     }
 
+    /// The k-th float of a source `vec3_t`-like structure (a union of an array and x, y, z).
+    pub fn sf_at(&self, s: S, k: usize) -> f64 {
+        match read_num(self.w(), s.addr + 4 * k as u32, Some(Kind::F32)) {
+            Some(Num::F(f)) => f,
+            _ => 0.0,
+        }
+    }
+
+    pub fn t_set_f_at(&mut self, t: T, k: usize, v: f64) {
+        write_num(&mut self.heap, t.addr + 4 * k as u32, Some(Kind::F32), Num::F(v));
+    }
+
+    /// The stable identity (an insert slot) of the data a reusable pointer member in the temporary block designates.
+    pub fn s_reuse_key(&self, s: S, name: &str) -> Option<u32> {
+        let m = self.smember(s.sid, name)?;
+        self.w().reuse_key.get(&(s.addr + m.off)).copied()
+    }
+
+    /// The id of the asset an asset-pointer member of a source structure refers to.
+    pub fn s_asset_id(&self, s: S, name: &str) -> Option<u32> {
+        let m = self.smember(s.sid, name)?;
+        self.w().ref_id.get(&(s.addr + m.off)).copied()
+    }
+
+    /// Whether the memory of the asset (by source id) can still be read: it was loaded by the entry being converted.
+    pub fn s_asset_readable(&self, id: u32) -> bool {
+        self.by_id.get(&id).is_some_and(|&i| self.events[i].top == self.cur_entry)
+    }
+
+    /// The address of a member of a source structure.
+    pub fn s_at(&self, s: S, name: &str) -> u32 {
+        s.addr + self.smember(s.sid, name).map(|m| m.off).unwrap_or(0)
+    }
+
+    /// The address of a member of a target structure.
+    pub fn t_at(&self, t: T, name: &str) -> u32 {
+        t.addr + self.tmember(t.sid, name).map(|m| m.off).unwrap_or(0)
+    }
+
+    /// Bytes of a pointer in the source zone.
+    pub fn s_psz(&self) -> u32 {
+        self.w().psz as u32
+    }
+
+    pub fn ssid(&self, name: &str) -> Option<usize> {
+        self.ss.by_name.get(name).copied()
+    }
+
+    pub fn tsid(&self, name: &str) -> Option<usize> {
+        self.ts.by_name.get(name).copied()
+    }
+
+    pub fn ssize(&self, sid: usize) -> u32 {
+        self.ss.structs[sid].size
+    }
+
+    pub fn tsize(&self, sid: usize) -> u32 {
+        self.ts.structs[sid].size
+    }
+
+    /// Points a pointer member of a target structure at a heap object.
+    pub fn t_set_ptr(&mut self, t: T, name: &str, addr: u32) {
+        if let Some(m) = self.tmember(t.sid, name) {
+            self.heap.set_ptr(t.addr + m.off, addr);
+        }
+    }
+
+    /// The heap address a pointer member of a target structure holds.
+    pub fn t_ptr(&self, t: T, name: &str) -> u32 {
+        self.tmember(t.sid, name).map(|m| self.heap.ptr(t.addr + m.off)).unwrap_or(0)
+    }
+
+    /// Replaces the pointer member `name` of a target structure by `n` floats taken from the source array at `sp`, `skip` floats
+    /// of each `stride` dropped from every group (`take` kept).
+    pub fn t_repack_floats(&mut self, t: T, name: &str, sp: u32, groups: usize, stride: usize, take: usize) {
+        if sp == 0 || groups == 0 {
+            return;
+        }
+        let a = self.heap.alloc(groups * take * 4, 4);
+        for g in 0..groups {
+            let b = self.s_bytes(sp + (g * stride * 4) as u32, take * 4).map(|b| b.to_vec());
+            if let Some(b) = b {
+                self.heap.put(a + (g * take * 4) as u32, &b);
+            }
+        }
+        self.t_set_ptr(t, name, a);
+    }
+
     /// A dummy object for pointers into runtime memory (only the pointer's being set matters: the loader reserves the memory).
     pub fn dummy(&mut self) -> u32 {
         if self.dummy == 0 {
@@ -581,6 +682,15 @@ impl Conv {
         r
     }
 
+    /// `generic_members` without the named members of the target structure (a rule converts those itself).
+    pub fn generic_members_except(&mut self, s: S, t: T, skip: &[&'static str]) -> R {
+        let n = self.skip_members.len();
+        self.skip_members.extend(skip.iter().map(|m| (t.sid, *m)));
+        let r = self.generic_members(s, t);
+        self.skip_members.truncate(n);
+        r
+    }
+
     /// The by-name conversion of the members of a structure (no rules for the structure itself; its members' structures apply theirs).
     pub fn generic_members(&mut self, s: S, t: T) -> R {
         let sst = &self.ss.structs[s.sid];
@@ -604,6 +714,9 @@ impl Conv {
         for pass in 0..2 {
             for tm in &tst.members {
                 if tm.ign || tm.bits > 0 {
+                    continue;
+                }
+                if self.skip_members.iter().any(|(sid, m)| *sid == t.sid && *m == tm.name) {
                     continue;
                 }
                 let Some(sm) = self.find_src(sst, tst, tm) else { continue };
@@ -818,7 +931,18 @@ impl Conv {
         }
         let psz = self.heap.psz;
         let _ = psz;
+        // data a reusable pointer shares through the temporary block is gone after its entry: it is found again by its insert slot
+        let key = if sm.reusable && sm.blk.is_some_and(|b| self.ss.blocks[b as usize].1 == 0) && !sm.is_string { self.w().reuse_key.get(&sa).copied() } else { None };
+        if let (Some(k), Some(tt)) = (key, tm.ty) {
+            if let Some(&a) = self.persist.get(&(k, tt)) {
+                self.heap.set_ptr(ta, a);
+                return Ok(());
+            }
+        }
         let v = self.pointee(sm, sa, sp, 1, tm)?;
+        if let (Some(k), Some(tt)) = (key, tm.ty) {
+            self.persist.insert((k, tt), v);
+        }
         self.heap.set_ptr(ta, v);
         Ok(())
     }
@@ -835,8 +959,21 @@ impl Conv {
             if sasset && tasset {
                 return Ok(self.asset_at_slot(slot));
             }
-            self.warn(format!("{} is an asset reference on one side only", tm.name));
-            return Ok(0);
+            if sasset {
+                // the target embeds what the source refers to as an asset: the converted asset is the structure
+                let a = self.asset_at_slot(slot);
+                if a != 0 && tm.ty.is_some_and(|t| self.asset_struct.get(&a) == Some(&t)) {
+                    return Ok(a);
+                }
+                if a != 0 {
+                    self.warn(format!("{} refers to an asset of another structure than the target embeds", tm.name));
+                }
+                return Ok(0);
+            }
+            // the source embeds a structure that the target keeps as an asset: it becomes one, shared by name
+            let (Some(st), Some(tt)) = (sm.ty, tm.ty) else { return Ok(0) };
+            let a = self.struct_array(sp, 1, st, tt)?;
+            return Ok(self.share_by_name(a, sp, st, tt));
         }
         match (sm.ty, tm.ty) {
             (Some(st), Some(tt)) => self.struct_array(sp, n, st, tt),
@@ -844,6 +981,37 @@ impl Conv {
             _ => {
                 self.warn(format!("{} points at a structure on one side only", tm.name));
                 Ok(0)
+            }
+        }
+    }
+
+    /// An asset made from a structure the source embeds: the same name (or, when the source has none, the same bytes) gives the same asset.
+    fn share_by_name(&mut self, a: u32, sp: u32, st: usize, tt: usize) -> u32 {
+        let name_off = self.ts.structs[tt].members.iter().find(|m| m.name == "name" && m.is_string).map(|m| m.off);
+        let mut name: Vec<u8> = Vec::new();
+        if let Some(off) = name_off {
+            let p = self.heap.ptr(a + off);
+            if p != 0 {
+                let mut q = p;
+                while self.heap.fits(q, 1) && self.heap.get(q, 1)[0] != 0 {
+                    name.push(self.heap.get(q, 1)[0]);
+                    q += 1;
+                }
+            } else {
+                // no name in the source: one made from the bytes
+                let n = self.ss.structs[st].size as usize;
+                let h = self.s_bytes(sp, n).map(|b| b.iter().fold(0x811c9dc5u32, |h, &c| (h ^ c as u32).wrapping_mul(0x0100_0193))).unwrap_or(0);
+                name = format!("{}_{h:08x}", self.ts.structs[tt].name.to_ascii_lowercase()).into_bytes();
+                let sa = self.heap.alloc_cstr(&name);
+                self.heap.set_ptr(a + off, sa);
+            }
+        }
+        match self.named_assets.get(&(tt, name.clone())) {
+            Some(&e) => e,
+            None => {
+                self.named_assets.insert((tt, name), a);
+                self.asset_struct.insert(a, tt);
+                a
             }
         }
     }
@@ -1278,6 +1446,7 @@ impl Conv {
         };
         let hdr = self.heap.alloc(self.ts.structs[tsid].size as usize, 4);
         self.assets.insert(id, Some(hdr));
+        self.asset_struct.insert(hdr, tsid);
         let saved = (std::mem::replace(&mut self.svars, vec![0; self.ss.structs.len()]), std::mem::replace(&mut self.tvars, vec![0; self.ts.structs.len()]));
         self.dep_stack.push(Vec::new());
         self.ctx = tname.clone();

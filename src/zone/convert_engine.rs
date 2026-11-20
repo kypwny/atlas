@@ -445,6 +445,9 @@ struct Walker<'a> {
     entry_slot: u32,
     /// Slots of the asset-list entries (read mode).
     pub top_slots: HashSet<u32>,
+    /// Read mode: for a pointer slot of a reusable member in the temporary block, the insert slot of the data it designates
+    /// (stable across entries, unlike the temporary block's addresses).
+    pub reuse_key: HashMap<u32, u32>,
 }
 
 /// An asset that finished loading (read mode).
@@ -586,6 +589,7 @@ impl<'a> Walker<'a> {
             wm: None,
             entry_slot: 0,
             top_slots: HashSet::new(),
+            reuse_key: HashMap::new(),
         }
     }
 
@@ -1294,7 +1298,13 @@ impl<'a> Walker<'a> {
                 // ConvertOffsetToAliasNative: the slot at that offset holds the real pointer
                 let a = self.offset_ref(slot, p, self.psz)?;
                 let v = self.rdp(a)? as u32;
-                self.wrp(slot, v)
+                self.wrp(slot, v)?;
+                // a reference to an asset loaded earlier: the converter finds it by the slot
+                if let Some(&id) = self.id_at.get(&a) {
+                    self.ref_id.insert(slot, id);
+                }
+                self.reuse_key.insert(slot, a);
+                Ok(())
             }
         } else if zt == 1 {
             self.load_member_alloc(mc, lt)
@@ -1329,6 +1339,7 @@ impl<'a> Walker<'a> {
         let mut to_insert = 0u32;
         if in_temp && zt == 2 {
             to_insert = self.insert_slot()?;
+            self.reuse_key.insert(slot, to_insert);
         }
         self.load_member_type_check(mc, lt)?;
         if in_temp && zt == 2 {
@@ -2275,7 +2286,7 @@ pub fn emit(game: Game, mut heap: Heap, strings: &[u32], assets: &[(u32, u32)]) 
     let r = w.run_write(arr, strings.len(), ent, assets.len());
     if let Err(Fail(reason)) = r {
         let fp = if w.fail_path.is_empty() { String::new() } else { format!(" [in {}]", w.fail_path) };
-        return Err(format!("asset {} of {}: {reason}{fp}", w.top_index, assets.len()));
+        return Err(format!("asset {} of {}: {reason}{fp} (block offsets {:?})", w.top_index, assets.len(), w.off));
     }
     let mut out = std::mem::take(&mut w.wm.as_mut().unwrap().out);
     let sizes: Vec<u32> = (0..n).map(|b| if w.kind(b) == 0 { w.temp_peak as u32 } else { w.off[b] as u32 }).collect();

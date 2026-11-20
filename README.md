@@ -20,7 +20,7 @@ Open Call of Duty fastfiles, export models and maps to [Cast](https://github.com
 - Export models and animations to Cast for Blender, or to glTF, OBJ, SEModel and SEAnim.
 - Dump string tables, localize strings and raw files to CSV and JSON.
 - Unpack a zone to files, edit them, build it again (Call of Duty Online, Black Ops II).
-- Convert a stock MW2 zone to Call of Duty Online.
+- Convert zones between Call of Duty 4, Modern Warfare 2, Modern Warfare 3 and Call of Duty Online (`--convertzone SRC.ff --to GAME`).
 - Check whether a zone reads cleanly (CoD4, MW2, MW3, Black Ops II).
 - Pack IWDs, convert DDS to IWI.
 

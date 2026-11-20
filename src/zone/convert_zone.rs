@@ -488,7 +488,18 @@ fn assemble(stock: &ZoneImage, mut frags: Vec<Frag>, stats: BTreeMap<u32, TypeSt
         bail!("the block footprint changed after the block sizes were written");
     }
     if !r.dangling_references().is_empty() {
-        bail!("{} references dangle, e.g. {:?}", r.dangling_references().len(), &r.dangling_references()[..r.dangling_references().len().min(3)]);
+        // which converted asset holds the first of them
+        let mut start = done.table_offset + 16 * done.assets.len();
+        let mut holder = String::new();
+        let first = r.dangling_references()[0].0;
+        for f in &frags {
+            if first >= start && first < start + f.bytes.len() {
+                holder = format!("asset type {} {:?}, {} bytes into it", f.ty, f.name, first - start);
+                break;
+            }
+            start += f.bytes.len();
+        }
+        bail!("{} references dangle, e.g. {:?} (the first in {holder})", r.dangling_references().len(), &r.dangling_references()[..r.dangling_references().len().min(3)]);
     }
     Ok(Converted { image: done.data, block_sizes: sizes, stats, nulled, assets: done.assets.len(), warnings: WARNINGS.with(|w| w.borrow().clone()) })
 }
