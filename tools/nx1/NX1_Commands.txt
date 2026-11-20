@@ -39,6 +39,7 @@ use GfxImage;
 set count pixels cardMemory::platform;
 set allocalign pixels 4096;
 set block pixels XFILE_BLOCK_PHYSICAL;
+set blockif pixels semantic == 11 XFILE_BLOCK_RUNTIME;
 
 // ----- surfaces of models
 use XSurface;
@@ -128,3 +129,58 @@ set count aabbTree GfxWorld::aabbTreeCounts[GfxCellTree - GfxWorld::aabbTrees];
 
 use GfxLightGrid;
 set count rowDataStart maxs[rowAxis] - mins[rowAxis] + 1;
+
+// ----- animations (the same scheme as the other games of the family: the frames of a part are stored only when it has more
+// than one, in bytes or shorts by the number of frames of the whole animation)
+use XAnimParts;
+set count indices::_1 indexCount;
+set allocalign indices::_1 1;
+set count indices::_2 indexCount;
+set allocalign indices::_2 2;
+set condition indices always;
+set condition indices::_1 numframes < 256;
+set condition indices::_2 always;
+set condition indices::data never;
+reorder: name names notify deltaPart dataByte dataShort dataInt randomDataShort randomDataByte randomDataInt indices;
+
+use XAnimPartTrans;
+set condition u always;
+set condition u::frames size > 0;
+set condition u::frames::indices::_1 XAnimParts::numframes < 256;
+set arraysize u::frames::indices::_1 size + 1;
+set arraysize u::frames::indices::_2 size + 1;
+set condition u::frames::frames::_1 smallTrans != 0;
+set count u::frames::frames::_1 size + 1;
+set allocalign u::frames::frames::_1 1;
+set count u::frames::frames::_2 size + 1;
+set allocalign u::frames::frames::_2 4;
+reorder: size u;
+
+use XAnimPartTransFrames;
+reorder: indices frames;
+
+use XAnimDeltaPartQuat2;
+set condition u always;
+set condition u::frames size > 0;
+set condition u::frames::indices::_1 XAnimParts::numframes < 256;
+set arraysize u::frames::indices::_1 size + 1;
+set arraysize u::frames::indices::_2 size + 1;
+set count u::frames::frames size + 1;
+set allocalign u::frames::frames 4;
+reorder: size u;
+
+use XAnimDeltaPartQuatDataFrames2;
+reorder: indices frames;
+
+use XAnimDeltaPartQuat;
+set condition u always;
+set condition u::frames size > 0;
+set condition u::frames::indices::_1 XAnimParts::numframes < 256;
+set arraysize u::frames::indices::_1 size + 1;
+set arraysize u::frames::indices::_2 size + 1;
+set count u::frames::frames size + 1;
+set allocalign u::frames::frames 4;
+reorder: size u;
+
+use XAnimDeltaPartQuatDataFrames;
+reorder: indices frames;

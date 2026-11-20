@@ -274,15 +274,27 @@ class Model:
             sub = self.member_at(t["n"], rest, deep)
             return [m["n"]] + sub if sub else [m["n"]]
         if t["k"] == "arr" and rest > 0 and t["n"] > 0:
-            # an element of an array of scalars
-            return ["%s[%d]" % (m["n"], rest // (m["sz"] // t["n"]))]
+            # an element of an array (of scalars or pointers; two dimensions at most)
+            dims, el = [], t
+            while el["k"] == "arr":
+                dims.append(el["n"])
+                el = el["of"]
+            total = 1
+            for d in dims:
+                total *= d
+            flat = rest // (m["sz"] // total)
+            idx = []
+            for d in reversed(dims):
+                idx.append(flat % d)
+                flat //= d
+            return [m["n"] + "".join("[%d]" % i for i in reversed(idx))]
         return [m["n"]]
 
     def member_deep(self, sname, chain):
         cur = sname
         m = None
         for n in chain:
-            m = self.member(cur, n)
+            m = self.member(cur, re.sub(r"(\[\d+\])+$", "", n))
             if m is None:
                 return None
             nxt = struct_of_type(m["t"])
@@ -925,11 +937,11 @@ def emit(model, sname, f, lines):
         lines.append("set block %s;" % BLOCK_NAMES[f.struct_block])
     for t in f.todo:
         lines.append("// TODO %s" % t)
-    loaded = {re.sub(r"\[\d+\]", "", r.chain[0]) for r in f.rules.values()}
+    loaded = {re.sub(r"(\[\d+\])+", "", r.chain[0]) for r in f.rules.values()}
     for key in f.order:
         r = f.rules[key]
         name = r.name
-        base = re.sub(r"\[\d+\]", "", name)  # an element of an array of pointers: only the count is per element
+        base = re.sub(r"(\[\d+\])+", "", name)  # an element of an array of pointers: only the count is per element
         for t in r.todo:
             lines.append("// TODO %s: %s" % (name, t))
         if r.string:
@@ -953,7 +965,7 @@ def emit(model, sname, f, lines):
             lines.append("set condition %s never;" % m["n"])
     tops = []
     for key in f.order:
-        n = re.sub(r"\[\d+\]", "", f.rules[key].chain[0])
+        n = re.sub(r"(\[\d+\])+", "", f.rules[key].chain[0])
         if n not in tops:
             tops.append(n)
     if tops:

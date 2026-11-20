@@ -131,6 +131,8 @@ struct Member {
     reusable: bool,
     cond: Option<Expr>,
     blk: Option<u8>,
+    /// A block that replaces `blk` when the expression holds (the loader picks the block by a member of the structure).
+    bc: Option<(Expr, u8)>,
     aa: Option<Expr>,
     leaf: bool,
     ign: bool,
@@ -227,6 +229,10 @@ impl Schema {
                     reusable: m["re"] == 1,
                     cond: opt_expr(&m["c"])?,
                     blk: m["blk"].as_u64().map(|b| b as u8),
+                    bc: match m.get("bc") {
+                        Some(v) if !v.is_null() => Some((expr_from(&v[0])?, v[1].as_u64().unwrap() as u8)),
+                        _ => None,
+                    },
                     aa: opt_expr(&m["aa"])?,
                     leaf: m["leaf"] == 1,
                     ign: m["ign"] == 1,
@@ -1243,7 +1249,13 @@ impl<'a> Walker<'a> {
     }
 
     fn load_member_block(&mut self, mc: &Mc, lt: Load) -> Res {
-        let pushed = match mc.m.blk {
+        let mut blk = mc.m.blk;
+        if let Some((e, b)) = &mc.m.bc {
+            if self.eval(e)? != 0 {
+                blk = Some(*b);
+            }
+        }
+        let pushed = match blk {
             Some(b) if b as usize != self.s.default_normal => {
                 self.push_block(b as usize);
                 true

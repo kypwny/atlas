@@ -173,6 +173,19 @@ def closure_defs(types):
 
 
 class Tolerant(gz.CmdParser):
+    def set_cmd(self):
+        if self.peek() == "blockif":
+            # set blockif MEMBER EXPRESSION BLOCK;  the block a member is loaded in when the expression holds
+            self.next()
+            name = self.typename()
+            root, chain = self.lookup(name)
+            ev = self.evaluation(root)
+            bname = self.next()
+            self.expect(";")
+            chain[-1].block_if = (ev, gz.ENUMS[bname])
+            return
+        return super().set_cmd()
+
     """The Modern Warfare 2 statements that name something NX1 does not have are skipped."""
 
     skipped = []
@@ -258,6 +271,10 @@ def main():
         cmd.infos[struct].asset = "Asset" + struct
     infos = gz.compute_flags(cmd)
     out = gz.emit(cmd, infos, enum_vals)
+    for si in infos:
+        for k, mi in enumerate(si.members):
+            if getattr(mi, "block_if", None):
+                out["structs"][si.sid]["m"][k]["bc"] = [mi.block_if[0], mi.block_if[1]]
     enum = sorted((v, n) for n, v in types.struct_info("XAssetType")["values"])
     asset_names = []
     for v, n in enum:
