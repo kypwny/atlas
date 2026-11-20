@@ -135,6 +135,8 @@ enum Sh {
     PtrNPtr,
     /// An embedded array of array pointers (the counts per element).
     ArrN(usize),
+    /// A pointer to a small array (`float (*p)[4]`).
+    PtrArr(usize),
     /// An array whose element count is an expression (inside a structure of dynamic size).
     DynArr,
     Other,
@@ -162,6 +164,8 @@ fn shape(m: &Member) -> Sh {
                 Sh::ArrPtr(*n as usize)
             }
         }
+        [Mod::Array { n: n1, dsize: None, dcount: None }, Mod::Array { n: n2, dsize: None, dcount: None }, Mod::Ptr { count, .. }] if !is_array_count(count) => Sh::ArrPtr((*n1 * *n2) as usize),
+        [Mod::Ptr { count, .. }, Mod::Array { n, dsize: None, dcount: None }] if !is_array_count(count) => Sh::PtrArr(*n as usize),
         [Mod::Ptr { count, .. }, Mod::Ptr { count: c2, .. }] if is_array_count(count) && !is_array_count(c2) => Sh::PtrNPtr,
         [Mod::Array { dsize: Some(_), .. }] => Sh::DynArr,
         _ => Sh::Other,
@@ -169,7 +173,7 @@ fn shape(m: &Member) -> Sh {
 }
 
 fn pointerish(sh: Sh) -> bool {
-    matches!(sh, Sh::Ptr | Sh::PtrN | Sh::ArrPtr(_) | Sh::PtrNPtr | Sh::ArrN(_) | Sh::DynArr | Sh::Other)
+    matches!(sh, Sh::Ptr | Sh::PtrN | Sh::ArrPtr(_) | Sh::PtrNPtr | Sh::ArrN(_) | Sh::PtrArr(_) | Sh::DynArr | Sh::Other)
 }
 
 /// Rules of one conversion hop.
@@ -185,6 +189,8 @@ pub struct Rules {
     pub asset_map: HashMap<String, String>,
     /// Source asset structures that are not converted, with the reason.
     pub skip: HashMap<String, String>,
+    /// Source asset type name (`CLIPMAP_PVS`) -> target asset type name, where the names differ.
+    pub type_map: HashMap<String, String>,
 }
 
 /// Plain arrays at least this large are kept apart from the address window of the heap.
@@ -443,6 +449,44 @@ impl Conv {
         }
     }
 
+    /// Points the member `name` of a target structure at `n` elements of the source array at `sp` (primitive elements; the source
+    /// member of the same name gives the element type).
+    pub fn t_copy_array(&mut self, s: S, t: T, name: &str, sp: u32, n: usize) -> R {
+        let (Some(sm), Some(tm)) = (self.smember(s.sid, name), self.tmember(t.sid, name)) else { return Ok(()) };
+        if sp == 0 || n == 0 {
+            return Ok(());
+        }
+        let a = self.value_array(sp, n, sm, tm)?;
+        self.heap.set_ptr(t.addr + tm.off, a);
+        Ok(())
+    }
+
+    /// Element `i` of a structure-typed array member (embedded or behind a pointer) of a source structure.
+    pub fn s_elem(&self, s: S, name: &str, i: usize) -> Option<S> {
+        let m = self.smember(s.sid, name)?;
+        let ty = m.ty?;
+        let size = self.ss.structs[ty].size;
+        let base = match shape(m) {
+            Sh::Arr(_) => s.addr + m.off,
+            Sh::Ptr | Sh::PtrN => self.s_ptr(s.addr + m.off),
+            _ => return None,
+        };
+        (base != 0).then_some(S { sid: ty, addr: base + i as u32 * size })
+    }
+
+    /// The same for a target structure.
+    pub fn t_elem(&self, t: T, name: &str, i: usize) -> Option<T> {
+        let m = self.tmember(t.sid, name)?;
+        let ty = m.ty?;
+        let size = self.ts.structs[ty].size;
+        let base = match shape(m) {
+            Sh::Arr(_) => t.addr + m.off,
+            Sh::Ptr | Sh::PtrN => self.heap.ptr(t.addr + m.off),
+            _ => return None,
+        };
+        (base != 0).then_some(T { sid: ty, addr: base + i as u32 * size })
+    }
+
     /// A dummy object for pointers into runtime memory (only the pointer's being set matters: the loader reserves the memory).
     pub fn dummy(&mut self) -> u32 {
         if self.dummy == 0 {
@@ -516,7 +560,7 @@ impl Conv {
     // ---------------------------------------------------------------- structures
     /// Converts a source structure into the (zeroed or pre-filled) target storage, applying the rules of the target structure.
     pub fn generic(&mut self, s: S, t: T) -> R {
-        if t.addr < HEAP_BASE || t.addr >= HEAP_BASE + 0x0FFF_FFF0 {
+        if t.addr < HEAP_BASE || t.addr >= HEAP_BASE + HEAP_LIMIT {
             return Err(format!("{} -> {}: the target storage {:#x} is outside the heap (source {:#x}){}", self.ss.structs[s.sid].name, self.ts.structs[t.sid].name, t.addr, s.addr, if self.heap.overflow { " after the heap overflowed" } else { "" }));
         }
         let (sv, tv) = (self.svars[s.sid], self.tvars[t.sid]);
@@ -564,13 +608,16 @@ impl Conv {
                 }
                 let Some(sm) = self.find_src(sst, tst, tm) else { continue };
                 let (shs, sht) = (shape(sm), shape(tm));
-                if pointerish(sht) != (pass == 1) {
+                // members that hold pointers (also inside embedded structures) go after the plain values, so that the counts they
+                // depend on are in place
+                let late = pointerish(sht) || (matches!(sht, Sh::Val | Sh::Arr(_)) && tm.ty.is_some_and(|t| !self.ts.structs[t].leaf));
+                if late != (pass == 1) {
                     continue;
                 }
                 if sm.bits > 0 {
                     continue;
                 }
-                if pass == 1 && !self.src_loaded(sm) {
+                if pass == 1 && pointerish(sht) && !self.src_loaded(sm) {
                     continue;
                 }
                 self.member(s, sm, shs, t, tm, sht)?;
@@ -643,7 +690,25 @@ impl Conv {
                 Ok(())
             }
             (Sh::ArrN(ns), Sh::ArrN(nt)) => self.array_of_array_pointers(sm, sa, ns, tm, ta, nt),
+            (Sh::PtrArr(ns), Sh::PtrArr(nt)) => {
+                let sp = self.s_ptr(sa);
+                if sp != 0 && sm.ty.is_none() && tm.ty.is_none() && sm.es == tm.es {
+                    let es = sm.es as usize;
+                    let a = self.heap.alloc(nt * es, 4);
+                    let n = ns.min(nt);
+                    self.copy_raw(sp, a, n * es);
+                    self.heap.set_ptr(ta, a);
+                }
+                Ok(())
+            }
             (Sh::DynArr, Sh::DynArr) => {
+                let n_src = match &sm.mods[0] {
+                    Mod::Array { dsize: Some(e), .. } => eval_expr(e, &self.svars, self.w(), &self.ss.structs).unwrap_or(0).max(0) as usize,
+                    _ => 0,
+                };
+                if sm.ty.is_none() && tm.ty.is_none() && sm.es == tm.es {
+                    self.copy_raw(sa, ta, n_src * sm.es as usize);
+                }
                 // the elements were copied with the structure; the ones that hold pointers are converted in place
                 if let (Some(st), Some(tt)) = (sm.ty, tm.ty) {
                     if !self.ss.structs[st].leaf {
@@ -799,8 +864,9 @@ impl Conv {
                 return Ok(a);
             }
         }
+        let dyn_s = self.ss.structs[st].dynoff >= 0;
         // 64-bit zones: an offset pointer to a structure of dynamic size designates the word before it
-        if self.w().psz == 8 {
+        if self.w().psz == 8 && dyn_s {
             if let Some((&start, r)) = self.regions.range(sp + 1..=sp + 4).next() {
                 if r.ssid == st && r.tsid == tt && start - sp == 4 {
                     let a = r.tbase;
@@ -809,7 +875,6 @@ impl Conv {
                 }
             }
         }
-        let dyn_s = self.ss.structs[st].dynoff >= 0;
         if !dyn_s && ssz as usize * n >= BLOB_BYTES && self.same_layout(st, tt) {
             // a large array of plain data: kept apart, no part of it can be pointed at
             let bytes = self.s_bytes(sp, ssz as usize * n).map(|b| b.to_vec()).unwrap_or_default();
@@ -817,7 +882,17 @@ impl Conv {
             self.cache_put((sp, n, tt), a);
             return Ok(a);
         }
-        let size = if dyn_s { self.footprint(S { sid: st, addr: sp }) } else { tsz as usize * n };
+        let dyn_same = dyn_s && self.dyn_same(st, tt);
+        let size = if dyn_s {
+            if dyn_same {
+                self.footprint(S { sid: st, addr: sp })
+            } else {
+                let mut vars = self.svars.clone();
+                self.footprint_target(S { sid: st, addr: sp }, tt, &mut vars)
+            }
+        } else {
+            tsz as usize * n
+        };
         let base = self.heap.alloc(size.max(tsz as usize), 4);
         if self.heap.overflow {
             return Err(format!("{} x {} {} ({} bytes each) do not fit the address window of a zone", n, self.ts.structs[tt].name, self.ss.structs[st].name, tsz));
@@ -825,8 +900,11 @@ impl Conv {
         self.cache_put((sp, n, tt), base);
         self.region_put(sp, Region { ssz, n: n as u32, tbase: base, tsz, ssid: st, tsid: tt });
         if dyn_s {
-            // a structure of dynamic size: head and trailing data are contiguous in memory, copy them whole and patch the pointers
-            self.copy_raw(sp, base, size);
+            // a structure of dynamic size: head and trailing data are contiguous in memory; when both layouts are the same copy them
+            // whole and patch the pointers, otherwise convert member by member into a fresh footprint
+            if dyn_same {
+                self.copy_raw(sp, base, size);
+            }
             self.generic(S { sid: st, addr: sp }, T { sid: tt, addr: base })?;
             return Ok(base);
         }
@@ -883,6 +961,91 @@ impl Conv {
         }
         vars[s.sid] = saved;
         total
+    }
+
+    /// The size of the target's footprint for a source structure of dynamic size (the target's own element sizes).
+    fn footprint_target(&self, s: S, tt: usize, vars: &mut Vec<u32>) -> usize {
+        let tst = &self.ts.structs[tt];
+        let sst = &self.ss.structs[s.sid];
+        if tst.dynoff < 0 {
+            return tst.size as usize;
+        }
+        let saved = vars[s.sid];
+        vars[s.sid] = s.addr;
+        let mut total = tst.dynoff as usize;
+        let mut matched = false;
+        for sm in &sst.members {
+            if sm.ign || !sm.need || !sm.after_partial {
+                continue;
+            }
+            if sst.union && matched {
+                break;
+            }
+            let ok = match &sm.cond {
+                Some(c) => eval_expr(c, vars, self.w(), &self.ss.structs).unwrap_or(0) != 0,
+                None => true,
+            };
+            if !ok {
+                continue;
+            }
+            matched = true;
+            let Some(tm) = tst.members.iter().find(|m| self.rules.renames.get(&(tst.name.clone(), m.name.clone())).map(|r| r.as_str()).unwrap_or(m.name.as_str()) == sm.name) else { continue };
+            let sub = s.addr + sm.off;
+            match (sm.mods.first(), sm.ty, tm.ty) {
+                (Some(Mod::Array { dsize: Some(e), .. }), _, _) => {
+                    let n = eval_expr(e, vars, self.w(), &self.ss.structs).unwrap_or(0).max(0) as usize;
+                    total += n * tm.es as usize;
+                }
+                (None, Some(st), Some(tt2)) => total += self.footprint_target(S { sid: st, addr: sub }, tt2, vars),
+                (None, None, None) => total += tm.es as usize,
+                _ => {}
+            }
+        }
+        vars[s.sid] = saved;
+        total
+    }
+
+    /// Two structures of dynamic size with the same members at the same offsets and sizes (so a raw copy of the loaded memory is a
+    /// valid start for the target).
+    fn dyn_same(&mut self, ssid: usize, tsid: usize) -> bool {
+        if let Some(&r) = self.layout_memo.get(&(ssid, tsid)) {
+            return r;
+        }
+        self.layout_memo.insert((ssid, tsid), false);
+        let ok = self.struct_equal(ssid, tsid) && self.w().psz == self.heap.psz;
+        self.layout_memo.insert((ssid, tsid), ok);
+        ok
+    }
+
+    /// Same member names, offsets and kinds all the way down (data and pointers alike).
+    fn struct_equal(&mut self, p: usize, q: usize) -> bool {
+        let (a, b) = (&self.ss.structs[p], &self.ts.structs[q]);
+        if a.size != b.size || a.union != b.union || a.members.len() != b.members.len() || a.dynoff != b.dynoff {
+            return false;
+        }
+        for (x, y) in a.members.iter().zip(b.members.iter()) {
+            if x.name != y.name || x.off != y.off || x.k != y.k || x.mods.len() != y.mods.len() || x.es != y.es || x.is_string != y.is_string || x.after_partial != y.after_partial {
+                return false;
+            }
+            for (m1, m2) in x.mods.iter().zip(y.mods.iter()) {
+                match (m1, m2) {
+                    (Mod::Array { n: n1, .. }, Mod::Array { n: n2, .. }) if n1 == n2 => {}
+                    (Mod::Ptr { .. }, Mod::Ptr { .. }) => {}
+                    _ => return false,
+                }
+            }
+            match (x.ty, y.ty) {
+                (None, None) => {}
+                (Some(m), Some(n)) if m == p && n == q => {}
+                (Some(m), Some(n)) => {
+                    if !self.struct_equal(m, n) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 
     fn value_array(&mut self, sp: u32, n: usize, sm: &'static Member, tm: &'static Member) -> std::result::Result<u32, String> {
@@ -949,7 +1112,7 @@ impl Conv {
             _ => None,
         };
         let _ = (s, t);
-        if ns > 0x0040_0000 || nt.is_some_and(|v| v > 0x0040_0000) {
+        if ns * (tm.es.max(1) as usize) > 0x2000_0000 || nt.is_some_and(|v| v as usize * (tm.es.max(1) as usize) > 0x2000_0000) {
             return Err(format!("{}.{}: a count of {ns} (target {nt:?}) is out of range", self.ts.structs[t.sid].name, tm.name));
         }
         let n = match nt {
@@ -1069,6 +1232,11 @@ impl Conv {
             if p == 0 {
                 continue;
             }
+            if self.target_is_runtime(tm) {
+                let d = self.dummy();
+                self.heap.set_ptr(ta + i * psz, d);
+                continue;
+            }
             let v = self.pointee(sm, slot, p, 1, tm)?;
             self.heap.set_ptr(ta + i * psz, v);
         }
@@ -1185,8 +1353,13 @@ pub struct ZoneOut {
 }
 
 /// Maps the asset type of a source entry to the target's by name (`ASSET_TYPE_*`).
-fn target_type(ss: &Schema, ts: &Schema, ty: u32, tsid: usize) -> Option<u32> {
+fn target_type(ss: &Schema, ts: &Schema, ty: u32, tsid: usize, map: &HashMap<String, String>) -> Option<u32> {
     let name = ss.asset_names.get(ty as usize)?;
+    let short = name.trim_start_matches("ASSET_TYPE_");
+    let name = &match map.get(short) {
+        Some(m) => format!("ASSET_TYPE_{m}"),
+        None => name.clone(),
+    };
     if let Some(i) = ts.asset_names.iter().position(|n| n == name) {
         if ts.assets.get(&(i as u32)) == Some(&tsid) {
             return Some(i as u32);
@@ -1221,7 +1394,7 @@ impl Conv {
                 let sname = &self.ss.structs[rec.sid].name;
                 let tname = self.rules.asset_map.get(sname).cloned().unwrap_or_else(|| sname.clone());
                 let tsid = self.ts.by_name[&tname];
-                match target_type(self.ss, self.ts, ty, tsid) {
+                match target_type(self.ss, self.ts, ty, tsid, &self.rules.type_map) {
                     Some(tty) => {
                         st.0 += 1;
                         top.push(TopAsset { ty: tty, ptr, id: rec.id });

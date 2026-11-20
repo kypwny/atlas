@@ -130,6 +130,11 @@ fn hop(from: Fmt, to: Fmt) -> Option<HopFn> {
     match (from, to) {
         (a, b) if a == b && a != Fmt::Codol => Some(same_game),
         (Fmt::Iw4, Fmt::Codol) => Some(iw4_to_codol),
+        (Fmt::Codol, Fmt::Iw4) => Some(super::convert_from_codol::codol_to_iw4),
+        (Fmt::Iw3, Fmt::Iw4) => Some(super::convert_iw3::iw3_to_iw4),
+        (Fmt::Iw4, Fmt::Iw3) => Some(super::convert_iw3::iw4_to_iw3),
+        (Fmt::Iw5, Fmt::Iw4) => Some(super::convert_iw5::iw5_to_iw4),
+        (Fmt::Iw4, Fmt::Iw5) => Some(super::convert_iw5::iw4_to_iw5),
         _ => None,
     }
 }
@@ -363,6 +368,8 @@ fn run_batch(root: &Path, target: Fmt, key_folder: Option<&Path>) -> Result<()> 
     files.sort();
     let (mut ok, mut failed) = (0usize, 0usize);
     let mut totals: BTreeMap<u32, (usize, usize)> = BTreeMap::new();
+    let mut warnings: BTreeMap<String, usize> = BTreeMap::new();
+    let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
     let mut source_fmt = None;
     let t0 = std::time::Instant::now();
     for f in &files {
@@ -376,6 +383,14 @@ fn run_batch(root: &Path, target: Fmt, key_folder: Option<&Path>) -> Result<()> 
             Ok((_, steps)) => {
                 ok += 1;
                 let first = &steps[0];
+                for (w, n) in &first.out.warnings {
+                    *warnings.entry(w.clone()).or_default() += n;
+                }
+                for st in first.out.stats.values() {
+                    for (why, n) in &st.left_out {
+                        *reasons.entry(why.clone()).or_default() += n;
+                    }
+                }
                 let (c, l): (usize, usize) = first.out.stats.values().fold((0, 0), |a, s| (a.0 + s.converted, a.1 + s.left_out.values().sum::<usize>()));
                 for (ty, st) in &first.out.stats {
                     let e = totals.entry(*ty).or_default();
@@ -391,6 +406,12 @@ fn run_batch(root: &Path, target: Fmt, key_folder: Option<&Path>) -> Result<()> 
         }
     }
     println!("{} zones: {ok} converted and read cleanly, {failed} failed ({:.0}s)", files.len(), t0.elapsed().as_secs_f32());
+    for (why, n) in &reasons {
+        println!("  left out: {n} x {why}");
+    }
+    for (w, n) in warnings.iter().take(80) {
+        println!("  warning: {w} (x{n})");
+    }
     if let Some(sf) = source_fmt {
         for (ty, (c, l)) in &totals {
             println!("  type {ty:2} {:18} {c:6} converted, {l:6} left out", sf.type_name(*ty));

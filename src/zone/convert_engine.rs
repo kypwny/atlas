@@ -2100,8 +2100,8 @@ impl<'a> Walker<'a> {
 
 
 // ---------------------------------------------------------------------------------------------------------------- heap
-pub const HEAP_BASE: u32 = 0xF000_0000;
-const HEAP_LIMIT: u32 = 0x0FFF_FFF0;
+pub const HEAP_BASE: u32 = 0x9000_0000;
+pub const HEAP_LIMIT: u32 = 0x6FFF_FFE0;
 
 /// Scratch memory for structures in their target layout. Addresses are `HEAP_BASE` plus an offset; pointer fields hold addresses
 /// of other heap objects (or 0), as the loader would have left them once everything was loaded.
@@ -2126,7 +2126,7 @@ impl Heap {
     pub fn alloc(&mut self, size: usize, align: usize) -> u32 {
         let a = align.max(1);
         let off = self.mem.len().div_ceil(a) * a;
-        if size >= 0x1000_0000 || off + size >= HEAP_LIMIT as usize - 16 {
+        if size >= 0x4000_0000 || off + size >= HEAP_LIMIT as usize - 16 {
             // outside the address window (or a count that is far too large): remembered, the object is a stand-in
             self.overflow = true;
             return HEAP_BASE + 16;
