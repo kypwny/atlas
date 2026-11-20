@@ -257,8 +257,10 @@ fn strip(name: &str) -> &str {
 
 impl Conv {
     pub fn new(game: Game, target: Game, rules: Rules) -> Conv {
-        let ss = Schema::get(game);
-        let ts = Schema::get(target);
+        Conv::with_schemas(game, Schema::get(game), Schema::get(target), rules)
+    }
+
+    pub fn with_schemas(game: Game, ss: &'static Schema, ts: &'static Schema, rules: Rules) -> Conv {
         Conv {
             game,
             w_ptr: std::ptr::null(),
@@ -1553,6 +1555,11 @@ impl Conv {
             self.events.push(e.clone());
         }
         let Some(rec) = self.events.iter().rev().find(|e| e.top == i && w.top_slots.contains(&e.slot)).cloned() else {
+            if let Some(a) = w.assets.get(i).filter(|a| a.skipped) {
+                // an entry stepped over by its extent: no loader for it in the source layout
+                let why = format!("{} is not read from Call of Duty Online (no layout for it here)", self.ss.asset_names.get(a.ty as usize).map(|n| n.as_str()).unwrap_or("this asset type"));
+                *stats.entry(a.ty).or_default().1.entry(why).or_default() += 1;
+            }
             self.w_ptr = std::ptr::null();
             return;
         };
@@ -1582,7 +1589,12 @@ impl Conv {
 
 /// Converts every asset of the source zone with `rules` and writes the target zone image.
 pub fn convert_zone(game: Game, zone: &ZoneImage, target: Game, rules: Rules) -> std::result::Result<ZoneOut, String> {
-    let mut c = Conv::new(game, target, rules);
+    convert_zone_s(game, Schema::get(game), zone, ExtSync::default(), target, rules)
+}
+
+/// `convert_zone` with the source layout given as a schema (`game` only labels it); `sync` see [`ExtSync`].
+pub fn convert_zone_s(game: Game, source: &'static Schema, zone: &ZoneImage, sync: ExtSync, target: Game, rules: Rules) -> std::result::Result<ZoneOut, String> {
+    let mut c = Conv::with_schemas(game, source, Schema::get(target), rules);
     let mut stats: Stats = BTreeMap::new();
     let mut top: Vec<TopAsset> = Vec::new();
     let mut strings: Vec<Vec<u8>> = Vec::new();
@@ -1597,7 +1609,7 @@ pub fn convert_zone(game: Game, zone: &ZoneImage, target: Game, rules: Rules) ->
             }
             c.convert_entry(w, i, &mut top, &mut stats);
         };
-        walk_entries(game, zone, &mut cb)?;
+        walk_entries_s(source, game, zone, sync, &mut cb)?;
     }
     if c.heap.overflow {
         return Err("the converted structures do not fit the address window of the heap (or a count is far too large)".to_string());

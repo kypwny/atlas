@@ -137,6 +137,8 @@ pub struct Schema {
     has_depends: bool,
     /// Pointer size in the zone (4, or 8 for the 64-bit builds).
     ptr: usize,
+    /// Call of Duty Online: the asset list has 16-byte entries (type, offset, reference, extent) and every asset ends at its extent.
+    extents: bool,
 }
 
 fn expr_from(v: &Value) -> Result<Expr> {
@@ -168,6 +170,11 @@ impl Schema {
             Game::Iw5 => include_str!("schema/iw5.json"),
         };
         let root: Value = serde_json::from_str(text)?;
+        Schema::from_value(&root, game == Game::T6)
+    }
+
+    /// The schema a JSON document (the format of `schema/*.json`) describes.
+    pub fn from_value(root: &Value, has_depends: bool) -> Result<Schema> {
         let mut structs = Vec::new();
         for s in root["structs"].as_array().unwrap() {
             let mut members = Vec::new();
@@ -232,9 +239,15 @@ impl Schema {
             insert: root["insert"].as_u64().unwrap() as usize,
             default_normal: first_default(3),
             default_temp: first_default(0),
-            has_depends: game == Game::T6,
+            has_depends,
             ptr: root["ptr"].as_u64().unwrap_or(4) as usize,
+            extents: root["extents"] == true,
         })
+    }
+
+    /// Whether the schema has a loader for asset type `ty`.
+    pub fn reads(&self, ty: u32) -> bool {
+        self.assets.contains_key(&ty)
     }
 
     pub fn get(game: Game) -> &'static Schema {
@@ -264,6 +277,8 @@ pub struct WalkedAsset {
     /// Image offsets where the asset's data starts and ends.
     pub start: usize,
     pub end: usize,
+    /// The entry carries data this layout has no loader for; it was stepped over by its extent (Call of Duty Online zones).
+    pub skipped: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -448,6 +463,10 @@ struct Walker<'a> {
     /// Read mode: for a pointer slot of a reusable member in the temporary block, the insert slot of the data it designates
     /// (stable across entries, unlike the temporary block's addresses).
     pub reuse_key: HashMap<u32, u32>,
+    /// Call of Duty Online: the block positions after each entry that is stepped over (see `ExtSync`).
+    sync: ExtSync,
+    /// Development aid: the asset-list index whose block operations are printed (`ATLAS_CODOL_TRACE`).
+    trace: Option<usize>,
 }
 
 /// An asset that finished loading (read mode).
@@ -539,7 +558,10 @@ fn is_array_eval(e: &Expr) -> bool {
 
 impl<'a> Walker<'a> {
     fn new(game: Game, zone: &'a ZoneImage) -> Walker<'a> {
-        let s = Schema::get(game);
+        Walker::new_s(Schema::get(game), game, zone)
+    }
+
+    fn new_s(s: &'static Schema, game: Game, zone: &'a ZoneImage) -> Walker<'a> {
         let n = s.blocks.len();
         let mut sizes = vec![0usize; n];
         let mut mem = Vec::new();
@@ -547,11 +569,14 @@ impl<'a> Walker<'a> {
             sizes[i] = zone.block_sizes[i] as usize;
             mem.push(if s.blocks[i].1 == 0 || s.blocks[i].1 == 3 { vec![0u8; sizes[i]] } else { Vec::new() });
         }
-        Walker::with_blocks(game, &zone.image, sizes, mem)
+        Walker::with_blocks_s(s, game, &zone.image, sizes, mem)
     }
 
     fn with_blocks(game: Game, img: &'a [u8], sizes: Vec<usize>, mem: Vec<Vec<u8>>) -> Walker<'a> {
-        let s = Schema::get(game);
+        Walker::with_blocks_s(Schema::get(game), game, img, sizes, mem)
+    }
+
+    fn with_blocks_s(s: &'static Schema, game: Game, img: &'a [u8], sizes: Vec<usize>, mem: Vec<Vec<u8>>) -> Walker<'a> {
         let n = s.blocks.len();
         Walker {
             s,
@@ -590,6 +615,8 @@ impl<'a> Walker<'a> {
             entry_slot: 0,
             top_slots: HashSet::new(),
             reuse_key: HashMap::new(),
+            sync: ExtSync::default(),
+            trace: std::env::var("ATLAS_CODOL_TRACE").ok().and_then(|v| v.parse().ok()),
         }
     }
 
@@ -681,6 +708,9 @@ impl<'a> Walker<'a> {
             return fail(format!("block {} overflows its size {} (alignment {align})", self.bname(b), self.sizes[b]));
         }
         self.record(EvKind::Alloc, b, self.off[b], 0, u32::MAX as usize);
+        if self.trace == Some(self.top_index) {
+            eprintln!("alloc b{} at {} (align {align}) path {}", b, self.off[b], self.path.iter().map(|p| p.1).collect::<Vec<_>>().join("."));
+        }
         Ok(self.enc(b, self.off[b]))
     }
 
@@ -713,6 +743,9 @@ impl<'a> Walker<'a> {
                     }
                 }
                 self.record(EvKind::Bytes, b, start, n, self.pos);
+                if self.trace == Some(self.top_index) {
+                    eprintln!("load b{} at {} n {} stream {:#x}", b, start, n, self.pos);
+                }
                 self.pos += n;
             }
             1 => self.record(EvKind::Bytes, b, start, n, u32::MAX as usize),
@@ -736,6 +769,9 @@ impl<'a> Walker<'a> {
         let (first, at) = (self.off[b], self.pos);
         let r = self.load_cstr_bytes(b);
         if r.is_ok() {
+            if self.trace == Some(self.top_index) {
+                eprintln!("string b{} at {} n {} stream {:#x}", b, first, self.off[b] - first, at);
+            }
             self.record(EvKind::Bytes, b, first, self.off[b] - first, at);
         }
         r
@@ -2074,22 +2110,54 @@ impl<'a> Walker<'a> {
         if assets != 0 {
             let arr = self.alloc(psz as i64)?;
             let array_pos = self.pos;
-            self.load_n(2 * psz * asset_count)?;
+            let ext = self.s.extents;
+            // the entries: (type, pointer), or for Call of Duty Online (type, offset, reference, extent)
+            let (stride, slot_off) = if ext { (16usize, 8usize) } else { (2 * psz, psz) };
+            self.load_n(stride * asset_count)?;
             if let Some(r) = self.rec.as_mut() {
                 r.layout.array_pos = array_pos;
                 r.layout.array_count = asset_count;
                 r.layout.preamble = 0..r.layout.events.len();
             }
             for i in 0..asset_count {
-                let entry = arr + (2 * psz * i) as u32;
+                let entry = arr + (stride * i) as u32;
                 let ty = self.rd32(entry)?;
-                let slot = entry + psz as u32;
+                let slot = entry + slot_off as u32;
                 let start = self.pos;
+                let extent = if ext { self.rd32(entry + 12)? as usize } else { 0 };
                 zone_asset_types.push((i, ty));
                 self.top_index = i;
-                if self.s.skip.contains(&ty) {
-                    self.assets.push(WalkedAsset { index: i, ty, name: String::new(), reference: true, start, end: self.pos });
+                let reference = if ext { self.rd32(slot)? } else { 0 };
+                // Call of Duty Online: an entry without data that names no earlier asset (types without a loader) is empty, and one the
+                // schema has no loader for is stepped over by its extent
+                let empty = ext && extent == 0 && reference as u64 >= self.following - 1;
+                let stepped = ext && !self.s.assets.contains_key(&ty);
+                if self.s.skip.contains(&ty) || empty || stepped {
+                    if stepped {
+                        if start + extent > self.img.len() {
+                            return fail(format!("asset {i} (type {ty}): its extent runs past the image"));
+                        }
+                        self.pos = start + extent;
+                        if extent > 0 {
+                            match self.sync.pos.get(i).copied().flatten() {
+                                Some(p) => {
+                                    for b in 0..self.s.blocks.len().min(8) {
+                                        if self.kind(b) != 0 {
+                                            self.off[b] = p[b];
+                                        }
+                                    }
+                                }
+                                None => return fail(format!("asset {i} (type {ty}) has no loader in this layout and no block positions were given for it")),
+                            }
+                        }
+                    }
+                    self.assets.push(WalkedAsset { index: i, ty, name: String::new(), reference: true, start, end: self.pos, skipped: stepped });
                     report.assets_walked = i + 1;
+                    if stepped {
+                        if let Some(cb) = cb.as_deref_mut() {
+                            cb(&*self, i);
+                        }
+                    }
                     continue;
                 }
                 let Some(&sid) = self.s.assets.get(&ty) else {
@@ -2107,6 +2175,18 @@ impl<'a> Walker<'a> {
                     rc.layout.assets.push(first_event..end);
                 }
                 r?;
+                if ext && self.pos != start + extent {
+                    return fail(format!("asset {i} (type {ty}) ended at {:#x} but its extent ends at {:#x}", self.pos, start + extent));
+                }
+                if ext {
+                    if let Some(p) = self.sync.pos.get(i).copied().flatten() {
+                        for b in 0..self.s.blocks.len().min(8) {
+                            if self.kind(b) != 0 && self.off[b] != p[b] {
+                                return fail(format!("asset {i} (type {ty}): block {} is at {} after it, the reference walker has {}", self.bname(b), self.off[b], p[b]));
+                            }
+                        }
+                    }
+                }
                 let mut name = String::new();
                 let reference = self.zpt(p) == 0;
                 if let Some((hs, hdr)) = self.last_header {
@@ -2114,7 +2194,7 @@ impl<'a> Walker<'a> {
                         name = self.asset_name(sid, hdr, 0).unwrap_or_default();
                     }
                 }
-                self.assets.push(WalkedAsset { index: i, ty, name, reference, start, end: self.pos });
+                self.assets.push(WalkedAsset { index: i, ty, name, reference, start, end: self.pos, skipped: false });
                 report.assets_walked = i + 1;
                 if let Some(cb) = cb.as_deref_mut() {
                     cb(&*self, i);
@@ -2327,9 +2407,21 @@ pub fn emit(game: Game, mut heap: Heap, strings: &[u32], assets: &[(u32, u32)]) 
 /// Walks `zone` in read mode (it has to walk exactly), calling `cb` after every asset-list entry while the entry's memory (the
 /// temporary block included) can still be read; the temporary block is reused for the next entry.
 pub fn walk_entries<'a>(game: Game, zone: &'a ZoneImage, cb: &mut dyn FnMut(&Walker<'a>, usize)) -> std::result::Result<Vec<WalkedAsset>, String> {
-    let s = Schema::get(game);
+    walk_entries_s(Schema::get(game), game, zone, ExtSync::default(), cb)
+}
+
+/// What a reference loader of the same zone reports (Call of Duty Online zones only): the block positions (all eight blocks) after
+/// each entry. They stand in for the entries the schema has no loader for and are checked against the others.
+#[derive(Default, Clone)]
+pub struct ExtSync {
+    pub pos: Vec<Option<[usize; 8]>>,
+}
+
+/// `walk_entries` for any schema (`label` names the game in messages).
+pub fn walk_entries_s<'a>(s: &'static Schema, game: Game, zone: &'a ZoneImage, sync: ExtSync, cb: &mut dyn FnMut(&Walker<'a>, usize)) -> std::result::Result<Vec<WalkedAsset>, String> {
     let n = s.blocks.len();
-    let mut w = Walker::new(game, zone);
+    let mut w = Walker::new_s(s, game, zone);
+    w.sync = sync;
     w.keep_temp = true;
     for b in 0..n {
         if s.blocks[b].1 == 0 {

@@ -572,6 +572,7 @@ pub fn command(args: &[String]) -> Result<()> {
             return qa_directory(Path::new(args.get(2).context("zone file")?), &key);
         }
         Some("qadump") => return super::convert_dev::qadump(&args[1..]),
+        Some("codoltrace") => return super::convert_codol::replay_trace(&args[1..]),
         Some("stockmodel") => return super::convert_dev::stockmodel(&args[1..]),
         Some("qastats") => return super::convert_dev::qastats(&args[1..]),
         Some("qalodhash") => return super::convert_dev::qalodhash(&args[1..]),

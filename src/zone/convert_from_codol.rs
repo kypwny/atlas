@@ -1,96 +1,64 @@
 //! Call of Duty Online (QA 3.3.3.3, 3.19, 1.1.1.13) -> stock IW4.
 //!
-//! What is converted is what the two games lay out the same way: the types whose QA structure is byte for byte the stock one
-//! (physics collision maps, animations, shaders, vertex declarations, sound curves, the common and effect worlds, light
-//! definitions, fonts, localized strings, raw files and string tables). Each such asset is checked on its own: its stream is put
-//! into a stock-layout zone and read by the stock reader, and it is kept only when that walk is exact (an asset that points at
-//! data elsewhere in the QA zone fails there and is left out). The other types have different headers in QA (models, materials,
-//! images, technique sets, ...) or different loaders (the collision map and the game world) and are not read yet.
+//! The zone is read by the conversion engine with the Call of Duty Online schema (`convert_codol`: the IW4 schema with the changes
+//! measured on real zones), the structures are rebuilt in the stock layout by member name, and the stock stream is
+//! written with the loader's own rules (`convert_engine`). The types the schema has no loader for (weapons, menus, vehicles,
+//! structured data, the zone-specific types) are stepped over by their directory extents and left out.
 
-use super::convert_cli::{engine_hop, verify, Fmt, HopOut, Input};
+use super::convert_cli::{Fmt, HopOut, Input};
+use super::convert_codol;
+use super::convert_engine::{self as ce, Conv, Rules, R, S, T};
 use super::convert_zone::TypeStat;
-use super::schema_walk::{self, Game, ZoneImage};
-use super::{u32_at, Zone};
-use anyhow::{bail, Result};
-use std::collections::BTreeMap;
+use super::schema_walk::Game;
+use super::Zone;
+use anyhow::{anyhow, Result};
 
-/// Asset types whose QA stream is the stock stream (the numbers are the same in both games).
-const IDENTICAL: &[u32] = &[1, 2, 6, 7, 8, 12, 16, 20, 22, 24, 27, 36, 37];
-
-/// A stock-layout zone image: the script strings of the QA zone, then the asset list with the given assets.
-fn draft(zone: &Zone, assets: &[(u32, &[u8])]) -> Vec<u8> {
-    let mut out = zone.data[..zone.table_offset].to_vec();
-    // block sizes: roomy, the engine pass that follows writes the real ones
-    let total: usize = assets.iter().map(|a| a.1.len()).sum::<usize>() + out.len() + 0x10_0000;
-    let sizes = [0x40_0000u32, 0, 0, total as u32, 0, 0, 0, 0];
-    for (i, s) in sizes.iter().enumerate() {
-        out[8 + 4 * i..12 + 4 * i].copy_from_slice(&s.to_le_bytes());
+/// The stock element type of a QA one (`convert_fx::qa_elem_type` the other way): QA has two more types, at 2 (a rotated sprite) and
+/// at 4 (a line); they become the nearest stock ones, a billboard sprite and a tail.
+fn stock_elem_type(qa: i64) -> i64 {
+    match qa {
+        0 | 1 => qa,
+        2 => 0,
+        3 => 2,
+        4 => 2,
+        n => n - 2,
     }
-    out[0x30..0x34].copy_from_slice(&(assets.len() as u32).to_le_bytes());
-    for (ty, _) in assets {
-        out.extend_from_slice(&ty.to_le_bytes());
-        out.extend_from_slice(&u32::MAX.to_le_bytes());
-    }
-    for (_, b) in assets {
-        out.extend_from_slice(b);
-    }
-    let size = (out.len() - 0x28) as u32;
-    out[0..4].copy_from_slice(&size.to_le_bytes());
-    out
 }
 
-/// Walks a draft with the stock reader and writes the block sizes it comes to into the header; the result has to read exactly.
-fn fit(name: &str, mut image: Vec<u8>) -> Result<Vec<u8>> {
-    let zi = ZoneImage { name: name.to_string(), block_sizes: (0..8).map(|i| u32_at(&image, 8 + 4 * i)).collect(), image: image.clone() };
-    let r = schema_walk::walk(Game::Iw4, &zi);
-    if let Some(f) = &r.failure {
-        bail!("the stock walker stops at asset {} (type {}) at {:#x}: {}", f.asset_index, f.ty, f.offset, f.reason);
-    }
-    if r.consumed != image.len() {
-        bail!("the stock walker used {:#x} of {:#x} bytes", r.consumed, image.len());
-    }
-    for b in 0..8 {
-        let v = if b == 0 { r.temp_peak } else { r.block_end[b] } as u32;
-        image[8 + 4 * b..12 + 4 * b].copy_from_slice(&v.to_le_bytes());
-    }
-    verify(Fmt::Iw4, name, &image)?;
-    Ok(image)
+/// The stock element flags of QA ones (`convert_fx::qa_flags` the other way): QA's bit 8 is the inserted flag, bits 9 to 16 are
+/// the stock bits 8 to 15.
+fn stock_flags(qa: u32) -> u32 {
+    (qa & 0xFFFE_0000) | ((qa & 0x0001_FE00) >> 1) | (qa & 0xFF)
+}
+
+fn elem_def(c: &mut Conv, s: S, t: T) -> R {
+    c.t_set_i(t, "elemType", stock_elem_type(c.si(s, "elemType")));
+    c.t_set_i(t, "flags", stock_flags(c.si(s, "flags") as u32) as i64);
+    c.generic_members_except(s, t, &["elemType", "flags"])
+}
+
+/// QA's material sort keys are the stock ones from 30 up plus one (measured on 500 materials present in both: 33 -> 34, 34 -> 35,
+/// 43 -> 44, 47 -> 48, 48 -> 49, 50 -> 51, 51 -> 52, 53 -> 54; 29 and below equal).
+fn material_info(c: &mut Conv, s: S, t: T) -> R {
+    let k = c.si(s, "sortKey");
+    c.t_set_i(t, "sortKey", if k >= 30 { k - 1 } else { k });
+    c.generic_members_except(s, t, &["sortKey"])
+}
+
+/// The rules of the conversion: what differs in value (not only in layout) between the two games.
+pub fn rules() -> Rules {
+    let mut r = Rules::default();
+    r.replace.insert("FxElemDef".to_string(), elem_def);
+    r.replace.insert("MaterialInfo".to_string(), material_info);
+    r
 }
 
 pub fn codol_to_iw4(input: &Input) -> Result<HopOut> {
+    debug_assert!(input.fmt == Fmt::Codol);
     let zone = Zone::from_image(input.version, input.image.clone())?;
-    if u32_at(&zone.data, 0x28) as usize != zone.string_count {
-        bail!("zone header inconsistent");
-    }
-    let mut stats: BTreeMap<u32, TypeStat> = BTreeMap::new();
-    let mut kept: Vec<(u32, &[u8])> = Vec::new();
-    for a in &zone.assets {
-        let st = stats.entry(a.asset_type).or_default();
-        let bytes = &zone.data[a.start..a.start + a.extent];
-        if !IDENTICAL.contains(&a.asset_type) {
-            *st.left_out.entry(format!("{} is laid out differently in Call of Duty Online (not read yet)", Fmt::Iw4.type_name(a.asset_type))).or_default() += 1;
-            continue;
-        }
-        if a.reference != u32::MAX && a.reference != u32::MAX - 1 {
-            *st.left_out.entry("its entry refers to data elsewhere".to_string()).or_default() += 1;
-            continue;
-        }
-        match fit(&input.name, draft(&zone, &[(a.asset_type, bytes)])) {
-            Ok(_) => {
-                st.converted += 1;
-                kept.push((a.asset_type, bytes));
-            }
-            Err(e) => {
-                let why = format!("{e:#}");
-                let why = why.split(" at ").next().unwrap_or("").to_string();
-                *st.left_out.entry(format!("does not read as a stock {} ({why})", Fmt::Iw4.type_name(a.asset_type))).or_default() += 1;
-            }
-        }
-    }
-    let image = fit(&input.name, draft(&zone, &kept))?;
-    let stock = Input { fmt: Fmt::Iw4, version: 276, name: input.name.clone(), image };
-    // the stock pass reads the draft and writes it again with its real block sizes
-    let mut out = engine_hop(Game::Iw4, Game::Iw4, Default::default(), &stock)?;
-    out.stats = stats;
-    Ok(out)
+    let sync = convert_codol::ext_sync(&zone, input.version).map_err(|e| anyhow!(e))?;
+    let source = convert_codol::schema(input.version);
+    let out = ce::convert_zone_s(Game::Iw4, source, &input.zone_image(), sync, Game::Iw4, rules()).map_err(|e| anyhow!(e))?;
+    let stats = out.stats.into_iter().map(|(ty, (converted, left_out))| (ty, TypeStat { converted, left_out })).collect();
+    Ok(HopOut { image: out.image, stats, nulled: out.nulled, warnings: out.warnings, assets: out.assets })
 }

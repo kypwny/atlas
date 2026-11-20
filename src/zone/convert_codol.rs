@@ -1,0 +1,496 @@
+//! The read schema of Call of Duty Online zones (QA 3.3.3.3, 3.19 and 1.1.1.13) for the conversion engine (`convert_engine`).
+//!
+//! The engine reads a zone with a schema (`schema/*.json`: the structures of a game, their members and the rules the loader applies to
+//! them). Call of Duty Online has none of its own; its structures are stock Modern Warfare 2 (IW4) structures with a list of changes,
+//! measured by the walker that reads these zones (`replay*.rs`) and by the converter
+//! in the other direction (`convert_zone.rs` and the `convert_*` files it uses). This file applies those changes to the IW4 schema when
+//! the schema is first used: a member is moved, added, dropped or widened by name, so every change is one line next to the numbers
+//! that justify it. Members keep the names they have in IW4, so the engine's by-name conversion carries their values over.
+//!
+//! The engine checks the result against the zone itself: every asset has to end at its directory extent and the block positions have
+//! to be the ones the reference walker reports (`ext_sync`).
+
+use super::convert_engine::{ExtSync, Schema};
+use super::{replay::Replay, Zone};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+/// Asset types read with the schema; every other type of a zone is stepped over by its directory extent.
+const READ: &[u32] = &[0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 20, 22, 24, 27, 30, 31, 36, 37, 40];
+
+/// The schema for a Call of Duty Online fastfile version (334, 423 or 461).
+pub fn schema(version: u32) -> &'static Schema {
+    static S: [OnceLock<Schema>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    let i = match version {
+        334 => 0,
+        461 => 2,
+        _ => 1,
+    };
+    S[i].get_or_init(|| {
+        let doc = build(version);
+        Schema::from_value(&doc, false).expect("the Call of Duty Online schema")
+    })
+}
+
+/// Block positions after each directory entry, from the reference walker (`Replay`): they stand in for the entries the schema does
+/// not read and check the ones it does.
+pub fn ext_sync(zone: &Zone, version: u32) -> Result<ExtSync, String> {
+    let s = schema(version);
+    let mut r = Replay::new(zone).map_err(|f| format!("the reference walker stops in the zone prefix: {} at {}", f.what, f.at))?;
+    let mut out = ExtSync { pos: Vec::with_capacity(zone.assets.len()) };
+    for i in 0..zone.assets.len() {
+        let e = zone.assets[i];
+        r.replay_asset(zone, i).map_err(|f| format!("the reference walker stops at asset {i} (type {}, extent {}): {} at {:#x}", e.asset_type, e.extent, f.what, f.at))?;
+        out.pos.push(Some(r.positions()));
+    }
+    Ok(out)
+}
+
+/// `atlas --convertzone codoltrace GAME_FOLDER ZONE INDEX`: the block-3 allocations the reference walker makes for one asset
+/// (address, length, where in the stream it started and whether it read stream bytes), to compare with the engine's trace
+/// (`ATLAS_CODOL_TRACE=INDEX`).
+pub fn replay_trace(args: &[String]) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let root = std::path::Path::new(args.first().context("game folder")?);
+    let key = super::export::find_key(root)?;
+    let zone = Zone::open(std::path::Path::new(args.get(1).context("zone")?), &key)?;
+    let index: usize = args.get(2).context("asset index")?.parse()?;
+    for i in index.saturating_sub(2)..(index + 4).min(zone.assets.len()) {
+        let a = zone.assets[i];
+        println!("entry {i}: type {} reference {:#x} extent {}", a.asset_type, a.reference, a.extent);
+    }
+    let mut r = Replay::new(&zone).map_err(|f| anyhow::anyhow!("{} at {}", f.what, f.at))?;
+    r.enable_tracing();
+    for i in 0..=index.min(zone.assets.len() - 1) {
+        r.replay_asset(&zone, i).map_err(|f| anyhow::anyhow!("asset {i}: {} at {:#x}", f.what, f.at))?;
+    }
+    println!("positions {:?}
+peaks     {:?}
+header    {:?}", r.positions(), r.block_positions(), zone.block_sizes);
+    let e = zone.assets[index];
+    println!("asset {index}: type {} at {:#x}, extent {:#x} (ends {:#x})", e.asset_type, e.start, e.extent, e.start + e.extent);
+    for (a, info) in r.block3_allocations().iter().zip(r.block3_allocation_info()) {
+        if a.0 == index {
+            println!("  b3 at {} len {} stream {:#x} {}", (a.1 & 0x0fff_ffff) - 1, a.2, info.0, if info.1 { "" } else { "(slot)" });
+        }
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------------------------------ the patcher
+
+/// The IW4 schema as a JSON document with the operations the changes need. Members are identified by an id while the document is
+/// patched, so the offsets inside the expressions that read members (counts, conditions) follow a member that moves.
+struct Doc {
+    v: Value,
+}
+
+fn scalar(name: &str, off: i64, kind: &str) -> Value {
+    let (size, tk) = match kind {
+        "i8" => (1, "char"),
+        "u8" => (1, "unsigned char"),
+        "i16" => (2, "short"),
+        "u16" => (2, "uint16_t"),
+        "i32" => (4, "int"),
+        "f32" => (4, "float"),
+        _ => (4, "unsigned int"),
+    };
+    json!({"n": name, "o": off, "k": kind, "ty": -1, "mods": [], "str": 0, "scr": 0, "re": 0, "c": null, "blk": null, "aa": null, "leaf": 1,
+           "ign": 0, "dyn": 0, "ap": 0, "need": 0, "es": size, "ea": size, "bits": 0, "ep": 0, "ma": size, "td": 0, "tk": tk})
+}
+
+impl Doc {
+    fn new() -> Doc {
+        let mut v: Value = serde_json::from_str(include_str!("schema/iw4.json")).expect("iw4 schema");
+        // give every member an id and turn the member offsets in the expressions into those ids
+        let mut next = 0u64;
+        for s in v["structs"].as_array_mut().unwrap() {
+            for m in s["m"].as_array_mut().unwrap() {
+                m["_id"] = json!(next);
+                next += 1;
+            }
+        }
+        let structs = v["structs"].clone();
+        fn visit(x: &mut Value, structs: &Value) {
+            match x {
+                Value::Array(a) => {
+                    if a.len() == 7 && a[0] == "d" && a[2].is_array() {
+                        let mut cur = a[1].as_u64().map(|r| r as usize);
+                        let refs = a[2].as_array_mut().unwrap();
+                        for r in refs.iter_mut() {
+                            let (off, deref) = (r[0].as_i64().unwrap(), r[1].clone());
+                            let Some(sid) = cur else { break };
+                            let hit = structs[sid]["m"].as_array().unwrap().iter().find(|m| m["o"].as_i64() == Some(off));
+                            match hit {
+                                Some(m) => {
+                                    *r = json!(["@", m["_id"].clone(), deref]);
+                                    cur = m["ty"].as_i64().filter(|&t| t >= 0).map(|t| t as usize);
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                    for e in a.iter_mut() {
+                        visit(e, structs);
+                    }
+                }
+                Value::Object(o) => {
+                    for (_, e) in o.iter_mut() {
+                        visit(e, structs);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut st = v["structs"].take();
+        visit(&mut st, &structs);
+        v["structs"] = st;
+        Doc { v }
+    }
+
+    fn sid(&self, name: &str) -> usize {
+        self.v["structs"].as_array().unwrap().iter().position(|s| s["n"] == name).unwrap_or_else(|| panic!("no structure {name}"))
+    }
+
+    fn members(&mut self, s: &str) -> &mut Vec<Value> {
+        let i = self.sid(s);
+        self.v["structs"][i]["m"].as_array_mut().unwrap()
+    }
+
+    fn member(&mut self, s: &str, m: &str) -> &mut Value {
+        self.members(s).iter_mut().find(|x| x["n"] == m).unwrap_or_else(|| panic!("no member {s}.{m}"))
+    }
+
+    fn off(&mut self, s: &str, m: &str) -> i64 {
+        self.member(s, m)["o"].as_i64().unwrap()
+    }
+
+    fn set_size(&mut self, s: &str, size: i64) {
+        let i = self.sid(s);
+        self.v["structs"][i]["s"] = json!(size);
+    }
+
+    /// Moves a member to `off`.
+    fn mv(&mut self, s: &str, m: &str, off: i64) {
+        self.member(s, m)["o"] = json!(off);
+    }
+
+    /// Moves every member at or behind `from` by `by` bytes and grows the structure.
+    fn shift(&mut self, s: &str, from: i64, by: i64) {
+        for m in self.members(s) {
+            let o = m["o"].as_i64().unwrap();
+            if o >= from {
+                m["o"] = json!(o + by);
+            }
+        }
+        let i = self.sid(s);
+        let size = self.v["structs"][i]["s"].as_i64().unwrap();
+        self.v["structs"][i]["s"] = json!(size + by);
+    }
+
+    /// The length of the (first) array of a member.
+    fn arr(&mut self, s: &str, m: &str, n: i64) {
+        let mods = self.member(s, m)["mods"].as_array_mut().unwrap();
+        let a = mods.iter_mut().find(|x| x[0] == "a").expect("an array member");
+        a[1] = json!(n);
+    }
+
+    fn kind(&mut self, s: &str, m: &str, kind: &str) {
+        let proto = scalar("", 0, kind);
+        let mem = self.member(s, m);
+        for k in ["k", "es", "ea", "ma", "tk"] {
+            mem[k] = proto[k].clone();
+        }
+    }
+
+    fn drop(&mut self, s: &str, m: &str) {
+        self.members(s).retain(|x| x["n"] != m);
+    }
+
+    fn add(&mut self, s: &str, mut member: Value) {
+        member["_id"] = json!(self.next_id());
+        self.members(s).push(member);
+    }
+
+    fn add_scalar(&mut self, s: &str, name: &str, off: i64, kind: &str) {
+        self.add(s, scalar(name, off, kind));
+    }
+
+    /// Adds a copy of member `from` of structure `from_s` at `off` under a new name, loaded in order after `after` (or last).
+    fn add_like(&mut self, s: &str, name: &str, off: i64, from_s: &str, from: &str, after: Option<&str>) {
+        let mut m = self.member(from_s, from).clone();
+        m["n"] = json!(name);
+        m["o"] = json!(off);
+        m["_id"] = json!(self.next_id());
+        let list = self.members(s);
+        let at = after.and_then(|a| list.iter().position(|x| x["n"] == a)).map(|p| p + 1).unwrap_or(list.len());
+        list.insert(at, m);
+    }
+
+    /// An asset pointer member like `from`, pointing at structure `target` instead.
+    fn add_asset_like(&mut self, s: &str, name: &str, off: i64, from_s: &str, from: &str, target: &str, after: Option<&str>) {
+        let t = self.sid(target);
+        let (size, align) = (self.v["structs"][t]["s"].clone(), self.v["structs"][t]["a"].clone());
+        self.add_like(s, name, off, from_s, from, after);
+        let m = self.member(s, name);
+        m["ty"] = json!(t);
+        m["tk"] = json!(target);
+        m["es"] = size;
+        m["ea"] = align;
+    }
+
+    /// The element count of a member that is a pointer to a fixed number of elements.
+    fn ptr_count(&mut self, s: &str, m: &str, n: i64) {
+        let mods = self.member(s, m)["mods"].as_array_mut().unwrap();
+        let p = mods.iter_mut().find(|x| x[0] == "p").expect("a pointer member");
+        p[1] = json!(["n", n]);
+    }
+
+    /// Renumbers the element types a member's condition compares with (`elemType == k`).
+    fn map_elem_types(&mut self, s: &str, m: &str, f: &dyn Fn(i64) -> i64) {
+        fn walk(x: &mut Value, f: &dyn Fn(i64) -> i64) {
+            if let Value::Array(a) = x {
+                if a.len() == 4 && a[0] == "o" && a[1] == "==" && a[3][0] == "n" {
+                    let k = a[3][1].as_i64().unwrap();
+                    a[3][1] = json!(f(k));
+                } else {
+                    for e in a.iter_mut() {
+                        walk(e, f);
+                    }
+                }
+            }
+        }
+        let c = &mut self.member(s, m)["c"];
+        walk(c, f);
+    }
+
+    /// Widens a condition that is a chain of `elemType == k` terms with the terms for `extra`.
+    fn or_elem_types(&mut self, s: &str, m: &str, extra: &[i64]) {
+        fn first(x: &Value) -> Option<Value> {
+            let a = x.as_array()?;
+            if a.len() == 4 && a[0] == "o" && a[1] == "==" {
+                return Some(x.clone());
+            }
+            a.iter().find_map(first)
+        }
+        let c = self.member(s, m)["c"].clone();
+        let leaf = first(&c).expect("an elemType term");
+        let mut out = c;
+        for &k in extra {
+            let mut t = leaf.clone();
+            t[3][1] = json!(k);
+            out = json!(["o", "||", out, t]);
+        }
+        self.member(s, m)["c"] = out;
+    }
+
+    fn next_id(&self) -> u64 {
+        self.v["structs"].as_array().unwrap().iter().flat_map(|s| s["m"].as_array().unwrap().iter()).filter_map(|m| m["_id"].as_u64()).max().unwrap_or(0) + 1
+    }
+
+    /// Writes the expression offsets back and refreshes the element sizes of members whose structure changed size.
+    fn finish(mut self, version: u32) -> Value {
+        let mut at: HashMap<u64, i64> = HashMap::new();
+        let sizes: Vec<i64> = self.v["structs"].as_array().unwrap().iter().map(|s| s["s"].as_i64().unwrap()).collect();
+        for s in self.v["structs"].as_array_mut().unwrap() {
+            for m in s["m"].as_array_mut().unwrap() {
+                at.insert(m["_id"].as_u64().unwrap(), m["o"].as_i64().unwrap());
+                if let Some(t) = m["ty"].as_i64().filter(|&t| t >= 0) {
+                    m["es"] = json!(sizes[t as usize]);
+                }
+            }
+        }
+        fn back(x: &mut Value, at: &HashMap<u64, i64>) {
+            match x {
+                Value::Array(a) => {
+                    if a.len() == 3 && a[0] == "@" {
+                        let id = a[1].as_u64().unwrap();
+                        *x = json!([at[&id], a[2].clone()]);
+                        return;
+                    }
+                    for e in a.iter_mut() {
+                        back(e, at);
+                    }
+                }
+                Value::Object(o) => {
+                    for (_, e) in o.iter_mut() {
+                        back(e, at);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut st = self.v["structs"].take();
+        back(&mut st, &at);
+        self.v["structs"] = st;
+        self.v["extents"] = json!(true);
+        self.v["game"] = json!(format!("CODOL{version}"));
+        // the asset types the schema reads; the rest are stepped over
+        let all = self.v["assets"].as_object().unwrap().clone();
+        let mut keep = serde_json::Map::new();
+        for (k, val) in all {
+            if READ.contains(&k.parse::<u32>().unwrap()) {
+                keep.insert(k, val);
+            }
+        }
+        self.v["assets"] = Value::Object(keep);
+        self.v
+    }
+}
+
+// ------------------------------------------------------------------------------------------------------------ the changes
+
+fn build(version: u32) -> Value {
+    let mut d = Doc::new();
+    qa_changes(&mut d, version);
+    d.finish(version)
+}
+
+/// QA 3.3.3.3 (423) and 3.19 (461).
+fn qa_changes(d: &mut Doc, _version: u32) {
+    // PhysPreset: 68 bytes in the IW5 layout. Six scaling members after the first ten (all zero unless the preset names a sound
+    // prefix, then 250, 250, 1, 1, 0, 0: 23 of 23 presets with a prefix), the two flag bytes behind them (convert_model.rs).
+    d.mv("PhysPreset", "tempDefaultToCylinder", 64);
+    d.mv("PhysPreset", "perSurfaceSndAlias", 65);
+    d.set_size("PhysPreset", 68);
+    for (i, n) in ["minMomentum", "maxMomentum", "minPitch", "maxPitch"].iter().enumerate() {
+        d.add_scalar("PhysPreset", n, 40 + 4 * i as i64, "f32");
+    }
+    d.add_scalar("PhysPreset", "volumeType", 56, "i32");
+    d.add_scalar("PhysPreset", "pitchType", 60, "i32");
+
+    // XModelSurfs: three more part-bit words (zero in every QA record); XSurface 64 -> 84 (convert_model.rs, "XModelSurfs").
+    d.arr("XModelSurfs", "partBits", 9);
+    d.set_size("XModelSurfs", 48);
+    d.drop("XSurface", "zoneHandle");
+    d.add_scalar("XSurface", "flags", 2, "u16");
+    d.mv("XSurface", "vertCount", 4);
+    d.mv("XSurface", "triCount", 6);
+    d.mv("XSurface", "baseTriIndex", 8);
+    d.kind("XSurface", "baseTriIndex", "u32");
+    d.mv("XSurface", "baseVertIndex", 12);
+    d.kind("XSurface", "baseVertIndex", "u32");
+    d.mv("XSurface", "triIndices", 16);
+    d.mv("XSurface", "vertInfo", 20);
+    d.mv("XSurface", "verts0", 32);
+    d.add_scalar("XSurface", "unknown36", 36, "u32");
+    d.mv("XSurface", "vertListCount", 40);
+    d.mv("XSurface", "vertList", 44);
+    d.add_scalar("XSurface", "unknown48", 48, "u32");
+    d.mv("XSurface", "partBits", 52);
+    d.arr("XSurface", "partBits", 8);
+    d.set_size("XSurface", 84);
+
+    // XModel 304 -> 360: the part-bit arrays are wider (noScalePartBits 6 -> 8 words, the skeleton pointers sit 8 bytes later), a lod
+    // record is 56 bytes (a surface name word after the surface record, nine part-bit words, no runtime surface pointer) and every
+    // member behind the lods is 56 bytes further (convert_model.rs, "XModel").
+    d.arr("XModel", "noScalePartBits", 8);
+    d.shift("XModel", 36, 8);
+    d.shift("XModel", 248, 48);
+    d.arr("XModelLodInfo", "partBits", 9);
+    d.drop("XModelLodInfo", "surfs");
+    d.mv("XModelLodInfo", "partBits", 16);
+    d.mv("XModelLodInfo", "lod", 52);
+    d.mv("XModelLodInfo", "smcBaseIndexPlusOne", 53);
+    d.mv("XModelLodInfo", "smcSubIndexMask", 54);
+    d.mv("XModelLodInfo", "smcBucket", 55);
+    d.set_size("XModelLodInfo", 56);
+    d.add_like("XModelLodInfo", "surfName", 12, "XModelSurfs", "name", Some("modelSurfs"));
+    // a collision surface's triangles are read only when the pointer is -1 (the reference walker), anything else is a reference
+    d.member("XModelCollSurf_s", "collTris")["re"] = json!(1);
+
+    // GfxImage 32 -> 52 (the header maps of convert.rs, measured on 7 aligned words: the name moves to +48, the texture pointer
+    // stays, the load definition and its data are in block 3, not temporary). The platform members sit where the maps put them:
+    // picmip, noPicmip and track at +12, the card memory at +24 and the sizes at +32.
+    d.mv("GfxImage", "picmip", 12);
+    d.mv("GfxImage", "noPicmip", 14);
+    d.mv("GfxImage", "track", 15);
+    d.mv("GfxImage", "cardMemory", 24);
+    d.mv("GfxImage", "width", 32);
+    d.mv("GfxImage", "height", 34);
+    d.mv("GfxImage", "depth", 36);
+    d.mv("GfxImage", "delayLoadPixels", 38);
+    d.mv("GfxImage", "name", 48);
+    d.set_size("GfxImage", 52);
+    d.member("GfxTexture", "loadDef")["blk"] = json!(3);
+
+    // MaterialTechniqueSet 204 -> 208: a word after the name; every member behind it moves up by four (header map: 51 of 51 words).
+    d.shift("MaterialTechniqueSet", 4, 4);
+
+    // Material 96 -> 104: the 24-byte info becomes 32 bytes with the name at +16 (measured on 500 materials present in both stock
+    // and QA `common_mp`: the surface type bits are the word at +20, the game flags the byte at +26, the sort key the byte at +28
+    // and the two atlas counts the bytes behind it; QA's draw surface words at +0 are zero in all of them).
+    d.mv("MaterialInfo", "name", 16);
+    d.mv("MaterialInfo", "surfaceTypeBits", 20);
+    d.mv("MaterialInfo", "gameFlags", 26);
+    d.mv("MaterialInfo", "sortKey", 28);
+    d.mv("MaterialInfo", "textureAtlasRowCount", 29);
+    d.mv("MaterialInfo", "textureAtlasColumnCount", 30);
+    d.mv("MaterialInfo", "drawSurf", 0);
+    d.drop("MaterialInfo", "hashIndex");
+    d.set_size("MaterialInfo", 32);
+    d.shift("Material", 24, 8);
+
+    // snd_alias_t 100 -> 108: two words after the flags (+60: 50 in 10,089 of 10,768 aliases; +64: nearly always 0), everything
+    // behind them eight bytes up (convert_sound.rs).
+    d.shift("snd_alias_t", 60, 8);
+    d.add_scalar("snd_alias_t", "unknown60", 60, "u32");
+    d.add_scalar("snd_alias_t", "unknown64", 64, "u32");
+
+    // LoadedSound 44 -> 48: one word before the data pointer.
+    d.shift("MssSound", 36, 4);
+    d.shift("LoadedSound", 40, 4);
+    d.add_scalar("MssSound", "unknown36", 36, "u32");
+
+    // TracerDef 112 -> 116: an effect reference at +8.
+    d.shift("TracerDef", 8, 4);
+    d.add_asset_like("TracerDef", "effect", 8, "TracerDef", "material", "FxEffectDef", Some("material"));
+
+    // FxImpactTable: 19 records of 35 effect references (stock 15).
+    d.ptr_count("FxImpactTable", "table", 19);
+
+    // FxElemDef 252 -> 260: a word at +252 and a string at +256 (loaded after the extended definition). The element types are
+    // numbered as in IW4 plus none or two from the trail on, and two new types sit at 2 and 4 (sprites that use a material).
+    d.set_size("FxElemDef", 260);
+    d.add_scalar("FxElemDef", "unknown252", 252, "u32");
+    d.add_like("FxElemDef", "name256", 256, "FxEffectDefRef", "name", Some("extended"));
+    for (s, m) in [("FxElemVisuals", "material"), ("FxElemVisuals", "model"), ("FxElemVisuals", "effectDef"), ("FxElemVisuals", "soundName"), ("FxElemDefVisuals", "markArray"), ("FxElemExtendedDefPtr", "trailDef"), ("FxElemExtendedDefPtr", "sparkFountainDef")] {
+        d.map_elem_types(s, m, &|k| match k {
+            0 | 1 => k,
+            2 => 3,
+            n => n + 2,
+        });
+    }
+    d.or_elem_types("FxElemVisuals", "material", &[2, 4]);
+    // FxElemVisStateSample 48 -> 64: each visual state is followed by two words
+    d.set_size("FxElemVisStateSample", 64);
+    d.mv("FxElemVisStateSample", "amplitude", 32);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unchanged_document_is_the_iw4_schema() {
+        let d = Doc::new();
+        let v = d.finish(423);
+        let orig: Value = serde_json::from_str(include_str!("schema/iw4.json")).unwrap();
+        let mut a = v;
+        // ids and the asset filter are the only differences
+        for s in a["structs"].as_array_mut().unwrap() {
+            for m in s["m"].as_array_mut().unwrap() {
+                m.as_object_mut().unwrap().remove("_id");
+            }
+        }
+        assert_eq!(a["structs"], orig["structs"]);
+    }
+
+    #[test]
+    fn the_schema_loads() {
+        for v in [334, 423, 461] {
+            let _ = schema(v);
+        }
+    }
+}
