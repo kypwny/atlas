@@ -47,7 +47,7 @@ pub(super) struct MapsState {
     for_root: Option<PathBuf>,
     filter: String,
     selected: Option<usize>,
-    message: Option<String>,
+    pub(super) message: Option<String>,
     rx: Option<Receiver<MapJob>>,
 }
 
@@ -312,9 +312,6 @@ impl App {
                 if let Some(i) = selected {
                     reveal(&self.maps.rows[i].path);
                 }
-            }
-            if let Some(m) = &self.maps.message {
-                ui.weak(m);
             }
         });
         ui.separator();

@@ -752,54 +752,17 @@ impl App {
                 self.iwd.open = true;
             }
             self.recent_ui(ui);
-            if ui.button("Games").on_hover_text("The folders you have opened and whether each is ready").clicked() {
-                self.games_open = true;
-            }
-            if ui.button("Log").on_hover_text("What the long jobs report").clicked() {
-                self.log_open = true;
-            }
             if ui.button("Settings").on_hover_text("Ctrl+,").clicked() {
                 self.settings_open = true;
             }
             if ui.button("?").on_hover_text("Keyboard shortcuts (F1)").clicked() {
                 self.help_open = true;
             }
-            if let Some(r) = &self.root {
-                ui.weak(r.display().to_string());
-            }
-            // which game the assets are for, from the IWI version bytes
-            if let Some((v, n)) = self.versions.first().copied() {
-                let e = iwi::engine(v);
-                let mixed = self.versions.len() > 1;
-                let text = if mixed {
-                    self.versions.iter().map(|(v, n)| format!("{} ×{n}", iwi::engine(*v).label(*v))).collect::<Vec<_>>().join(", ")
-                } else {
-                    e.label(v)
-                };
-                let r = ui.label(egui::RichText::new(format!("Assets: {text}")).strong().color(ui.visuals().hyperlink_color));
-                r.on_hover_text(format!(
-                    "Engine: {}
-From the IWI version byte in {} file(s).{}",
-                    e.engine,
-                    n,
-                    if e.checked { "" } else { "
-This version's layout is not yet checked against real files here." }
-                ));
-            }
         });
         if self.tab != Tab::Images {
             return;
         }
-        let Some(cat) = self.catalog.clone() else {
-            ui.label(&self.status);
-            if let Some(s) = &self.scan {
-                let (d, t) = (s.progress.done.load(Ordering::Relaxed), s.progress.total.load(Ordering::Relaxed));
-                if t > 0 {
-                    ui.add(egui::ProgressBar::new(d as f32 / t as f32).text(format!("{d} / {t}")));
-                }
-            }
-            return;
-        };
+        let Some(cat) = self.catalog.clone() else { return };
         ui.horizontal_wrapped(|ui| {
             let search = ui.add(egui::TextEdit::singleline(&mut self.filters.text).id_salt("search_box").hint_text("search names…  (Ctrl+F)").desired_width(220.0));
             if self.focus_search {
@@ -848,7 +811,69 @@ This version's layout is not yet checked against real files here." }
                 let entries: Vec<iwd::Entry> = self.visible.iter().filter_map(|&i| self.pack_entry(&cat, i, None)).collect();
                 self.iwd.add(entries);
             }
-            ui.weak(format!("{} of {} shown", self.visible.len(), cat.entries.len()));
+        });
+    }
+
+    /// The bar at the bottom: what the current tab last reported, scan progress, counts, and where things are.
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            // right side first: buttons, the engine, the folder
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Log").on_hover_text("What the long jobs report").clicked() {
+                    self.log_open = true;
+                }
+                if ui.small_button("Games").on_hover_text("The folders you have opened and whether each is ready").clicked() {
+                    self.games_open = true;
+                }
+                if let Some(r) = &self.root {
+                    ui.weak(r.display().to_string());
+                }
+            // which game the assets are for, from the IWI version bytes
+            if let Some((v, n)) = self.versions.first().copied() {
+                let e = iwi::engine(v);
+                let mixed = self.versions.len() > 1;
+                let text = if mixed {
+                    self.versions.iter().map(|(v, n)| format!("{} ×{n}", iwi::engine(*v).label(*v))).collect::<Vec<_>>().join(", ")
+                } else {
+                    e.label(v)
+                };
+                let r = ui.label(egui::RichText::new(format!("Assets: {text}")).strong().color(ui.visuals().hyperlink_color));
+                r.on_hover_text(format!(
+                    "Engine: {}
+From the IWI version byte in {} file(s).{}",
+                    e.engine,
+                    n,
+                    if e.checked { "" } else { "
+This version's layout is not yet checked against real files here." }
+                ));
+            }
+                // the rest, from the left
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if let Some(s) = &self.scan {
+                        let (d, t) = (s.progress.done.load(Ordering::Relaxed), s.progress.total.load(Ordering::Relaxed));
+                        ui.spinner();
+                        if t > 0 {
+                            ui.add(egui::ProgressBar::new(d as f32 / t as f32).desired_width(160.0).text(format!("{d} / {t}")));
+                        }
+                    }
+                    let message: Option<String> = match self.tab {
+                        Tab::Images => self.batch_message.clone().or_else(|| Some(self.status.clone())),
+                        Tab::Maps => self.maps.message.clone(),
+                        Tab::Materials => self.materials.message.clone(),
+                        Tab::Sounds => self.sounds.message.clone(),
+                        Tab::Data => self.data.message.clone(),
+                        Tab::Models => None,
+                    };
+                    if let Some(m) = message.filter(|m| !m.is_empty()) {
+                        ui.label(m);
+                    }
+                    if self.tab == Tab::Images {
+                        if let Some(cat) = &self.catalog {
+                            ui.weak(format!("· {} of {} shown", self.visible.len(), cat.entries.len()));
+                        }
+                    }
+                });
+            });
         });
     }
 
@@ -1427,6 +1452,7 @@ impl eframe::App for App {
         self.log_window(ui.ctx());
 
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
+        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         match self.tab {
             Tab::Images => {
                 egui::Panel::right("details").resizable(true).default_size(460.0).show(ui, |ui| self.details(ui));

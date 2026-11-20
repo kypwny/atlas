@@ -73,7 +73,7 @@ pub(super) struct SoundState {
     applied: Option<(String, usize)>,
     visible: Vec<usize>,
     selected: Option<usize>,
-    message: Option<String>,
+    pub(super) message: Option<String>,
     rx: Option<Receiver<Result<Vec<Sound>, String>>>,
     export_rx: Option<Receiver<(Vec<(String, Done)>, String)>>,
     audio: Audio,
@@ -306,9 +306,6 @@ impl App {
             }
             if busy {
                 ui.spinner();
-            }
-            if let Some(m) = &self.sounds.message {
-                ui.weak(m);
             }
         });
         ui.separator();

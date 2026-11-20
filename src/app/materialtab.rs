@@ -23,7 +23,7 @@ pub(super) struct MaterialState {
     applied: Option<(String, usize)>,
     visible: Vec<usize>,
     selected: Option<String>,
-    message: Option<String>,
+    pub(super) message: Option<String>,
     /// Which index the visible list was made from (its address), so a rebuilt index refreshes it.
     index_key: usize,
 }
@@ -155,9 +155,6 @@ impl App {
                     let list: Vec<&Material> = self.materials.visible.iter().map(|&i| all[i]).collect();
                     self.finish_material_export(&list, &dir, format, fix);
                 }
-            }
-            if let Some(m) = &self.materials.message {
-                ui.weak(m);
             }
         });
         ui.separator();

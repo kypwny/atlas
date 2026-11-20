@@ -29,7 +29,7 @@ pub(super) struct DataState {
     /// Weapon tables, built once per load (full and summary, per layout).
     weapons: Vec<(&'static str, Table, Table)>,
     full: bool,
-    message: Option<String>,
+    pub(super) message: Option<String>,
     progress: Arc<(AtomicUsize, AtomicUsize)>,
     pub(super) rx: Option<Receiver<Result<GameData, String>>>,
 }
@@ -135,9 +135,6 @@ impl App {
                 let (done, total) = (self.data.progress.0.load(Ordering::Relaxed), self.data.progress.1.load(Ordering::Relaxed));
                 ui.spinner();
                 ui.weak(format!("reading zones {done} / {total}"));
-            }
-            if let Some(m) = &self.data.message {
-                ui.weak(m);
             }
         });
         ui.separator();
