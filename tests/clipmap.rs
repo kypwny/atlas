@@ -40,8 +40,17 @@ fn hull_aabb(b: &Brush) -> Option<([f64; 3], [f64; 3], usize)> {
 fn brushes_of_a_319_map_are_closed_solids() {
     let Some(root) = std::env::var_os("CODOL_TEST_319").map(PathBuf::from) else { return };
     let key = export::find_key(&root).unwrap();
-    for name in ["mp_afghan.ff", "mp_battlecity.ff"] {
-        let path = export::zone_files(&root).into_iter().find(|p| p.file_name().unwrap().to_string_lossy() == name).unwrap();
+    let maps: Vec<PathBuf> = export::zone_files(&root)
+        .into_iter()
+        .filter(|p| {
+            let n = p.file_name().unwrap().to_string_lossy().into_owned();
+            n.starts_with("mp_") && !n.ends_with("_load.ff") && !n.ends_with("_const.ff") && n != "mp_playlists.ff"
+        })
+        .collect();
+    assert!(maps.len() > 30, "{} map zones", maps.len());
+    for path in maps {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let name = name.as_str();
         let zone = Zone::open(&path, &key).unwrap();
         let m = mapsrc::read(&zone, name).unwrap();
         let mut all: Vec<&Brush> = m.world.iter().collect();
@@ -63,7 +72,19 @@ fn brushes_of_a_319_map_are_closed_solids() {
         println!("{name}: {} brushes, {ok} solid, {tight} fill their bounds exactly, {degenerate} degenerate; {} entities, {} models, notes {:?}", all.len(), m.entities.len(), m.models.len(), m.report);
         assert!(degenerate * 50 < all.len(), "{degenerate} degenerate of {}", all.len());
         assert!(tight * 10 > ok * 9, "only {tight} of {ok} brushes fill their bounds");
-        assert!(m.entities.len() > 100 && m.models.len() > 100);
+        assert!(m.entities.len() > 100 && m.models.len() > 50, "{name}: {} entities, {} models", m.entities.len(), m.models.len());
+        assert!(m.report.iter().all(|l| !l.contains("unresolved") && !l.contains("out of range")), "{name}: {:?}", m.report);
+        // the angles written for a static model give its stored placement back (the engine's AnglesToAxis)
+        let mut worst = 0.0f64;
+        for sm in &m.models {
+            let back = mapsrc::angles_to_axis(&mapsrc::axis_to_angles(&sm.axis));
+            for r in 0..3 {
+                for c in 0..3 {
+                    worst = worst.max((back[r][c] - sm.axis[r][c]).abs());
+                }
+            }
+        }
+        assert!(worst < 2e-3, "{name}: a static model's angles are {worst} off its placement");
     }
 }
 

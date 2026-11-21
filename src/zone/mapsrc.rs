@@ -353,6 +353,40 @@ pub fn axis_to_angles(axis: &[[f64; 3]; 3]) -> [f64; 3] {
     [wrap(pitch), wrap(yaw), wrap(roll)]
 }
 
+/// The engine's `AnglesToAxis` (pitch, yaw, roll in degrees): rows forward, left, up. The inverse of [`axis_to_angles`]; a
+/// static model's placement in the zone is this matrix (`GfxPackedPlacement`: origin, axis, scale).
+pub fn angles_to_axis(angles: &[f64; 3]) -> [[f64; 3]; 3] {
+    let (sp, cp) = angles[0].to_radians().sin_cos();
+    let (sy, cy) = angles[1].to_radians().sin_cos();
+    let (sr, cr) = angles[2].to_radians().sin_cos();
+    [
+        [cp * cy, cp * sy, -sp],
+        [sr * sp * cy - sy * cr, sr * sp * sy + cr * cy, sr * cp],
+        [cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp],
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn angles_and_axis_are_inverse() {
+        for angles in [[0.0, 0.0, 0.0], [0.0, 90.0, 0.0], [10.0, 200.0, 0.0], [350.0, 45.0, 30.0], [20.0, 300.0, 340.0], [90.0, 0.0, 0.0], [270.0, 0.0, 0.0]] {
+            let axis = angles_to_axis(&angles);
+            let back = angles_to_axis(&axis_to_angles(&axis));
+            for r in 0..3 {
+                for c in 0..3 {
+                    assert!((axis[r][c] - back[r][c]).abs() < 1e-9, "{angles:?}: {axis:?} vs {back:?}");
+                }
+            }
+        }
+        // yaw 90: forward points along +y, left along -x
+        let a = angles_to_axis(&[0.0, 90.0, 0.0]);
+        assert!((a[0][1] - 1.0).abs() < 1e-12 && (a[1][0] + 1.0).abs() < 1e-12 && (a[2][2] - 1.0).abs() < 1e-12);
+    }
+}
+
 pub fn to_map(m: &MapSource) -> String {
     let mut out = String::new();
     let mut entity_no = 0usize;
