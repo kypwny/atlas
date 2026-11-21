@@ -15,6 +15,7 @@ usage:
   atlas [GAME_FOLDER]                     open the browser
   atlas --selftest GAME_FOLDER            decode every image, report problems
   atlas --map2zone GAME_FOLDER ZONE.ff EDITED.map OUT.ff   writes the edits of a .map made by --zone2map into the zone: entities and static model placement (added / deleted static models are refused; --rebuild-bsp builds the BSP again and drops terrain collision)
+  atlas --terrain2obj GAME_FOLDER ZONE.ff OUT.obj          the terrain collision of a CoDOL map as a Wavefront OBJ
   atlas --unzone GAME_FOLDER ZONE.ff OUT_DIR   every asset of a CoDOL zone as a file (map entities and raw files also as text)
   atlas --buildzone GAME_FOLDER DIR OUT.ff [--signed]   builds the zone again from those files: edited text replaces its asset, a deleted file removes it
   atlas --exportdata GAME_FOLDER OUT_DIR  string tables (CSV), localised strings (CSV, JSON) and raw files from every zone
@@ -233,6 +234,18 @@ fn main() -> Result<()> {
             for n in &plan.notes {
                 println!("note: {n}");
             }
+            Ok(())
+        }
+        Some("--terrain2obj") => {
+            // atlas --terrain2obj GAME_FOLDER ZONE.ff OUT.obj: the terrain collision of a CoDOL map as a Wavefront OBJ
+            let (root, zone_name, out) = (path_arg(&args, 1)?, args.get(2).context("zone file")?, path_arg(&args, 3)?);
+            let key = zone::export::find_key(&root)?;
+            let path = zone::export::zone_files(&root).into_iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(zone_name))).context("no such zone")?;
+            let z = zone::Zone::open(&path, &key)?;
+            let t = zone::terrain::read(&z)?;
+            let n = t.triangles().len();
+            std::fs::write(&out, t.to_obj())?;
+            println!("{zone_name}: {n} terrain triangles of {} stored in {} partitions -> {}", t.tris.len(), t.partitions.len(), out.display());
             Ok(())
         }
         Some("--zone2map") => {
@@ -1080,7 +1093,10 @@ fn rendermap(args: &[String]) -> Result<()> {
     let src = zone::mapsrc::read(&z, zone_name)?;
     let mut model = zone::world::model_of_zone(&z).map(|m| m.0).unwrap_or(model::Model { name: zone_name.clone(), surfaces: Vec::new() });
     let world_surfaces = model.surfaces.len();
-    let layers = zone::mapscene::layers(&src);
+    let mut layers = zone::mapscene::layers(&src);
+    if let Ok(t) = zone::terrain::read(&z) {
+        layers.push(zone::mapscene::terrain_layer(&t));
+    }
     let mut visible = vec![world_on; world_surfaces];
     for l in layers {
         let on = match layers_arg.as_str() {

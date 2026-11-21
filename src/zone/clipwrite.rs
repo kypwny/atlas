@@ -27,9 +27,10 @@ use std::collections::HashMap;
 /// What to rewrite besides the brushes.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Options {
-    /// Build the BSP (nodes and leaves) again from the brushes. The leaves of the zone's own BSP carry the terrain's collision
-    /// (which aabb trees to test); the new leaves do not, so **terrain collision is dropped**. Meant for maps without terrain
-    /// and for tests.
+    /// Build the BSP (nodes and leaves) again from the brushes. The terrain collision stays: each new leaf gets copies of the
+    /// aabb tree roots that touch its cell. The copies go in front of the old nodes (the server insists that a node's children
+    /// come after it), so every old child link moves up by the number of copies. A leaf names its trees by a 16-bit first index
+    /// and count: the leaves grow until the copies fit.
     pub rebuild_bsp: bool,
 }
 
@@ -327,6 +328,10 @@ pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource, o
     let mut bsp_bytes: Vec<u8> = Vec::new();
     let mut bsp_nodes_len = 0usize;
     let mut bsp_counts = (0usize, 0usize);
+    let mut terrain_extra: Vec<u8> = Vec::new();
+    let mut terrain_total = 0usize;
+    let mut terrain_moved = 0usize;
+    let aabbs_end_old = r.rec.clip_terrain.aabbs.0 + 32 * r.rec.clip_terrain.aabbs.1;
     if opts.rebuild_bsp {
         if nodes_end_old != leafs0.0 || nodes0.0 < r1 {
             bail!("the BSP nodes and leaves of this collision map are not laid out as expected (inline node planes?)");
@@ -341,7 +346,52 @@ pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource, o
             None => bail!("the zone has no world planes"),
         };
         let world_boxes: Vec<u16> = world_ids.clone();
-        let bsp = super::colltree::Bsp::build(&boxes, &world_boxes, 16);
+        // the terrain's aabb tree roots: the nodes the old leaves list, each with the terrain contents of its leaf
+        let (aabb_at, aabb_n) = r.rec.clip_terrain.aabbs;
+        let mut roots: Vec<(usize, Aabb, u32)> = Vec::new();
+        if aabb_n > 0 {
+            let mut by_node: HashMap<usize, u32> = HashMap::new();
+            for i in 0..leaf_n {
+                let o = rel(leaf0) + 40 * i;
+                let (first, count) = (u16::from_le_bytes([blob[o], blob[o + 1]]) as usize, u16::from_le_bytes([blob[o + 2], blob[o + 3]]) as usize);
+                for node in first..first + count {
+                    *by_node.entry(node).or_insert(0) |= rd32(blob, o + 8);
+                }
+            }
+            let mut keys: Vec<usize> = by_node.keys().copied().filter(|&n| n < aabb_n).collect();
+            keys.sort_unstable();
+            for n in keys {
+                let o = rel(aabb_at) + 32 * n;
+                let (origin, half): ([f32; 3], [f32; 3]) = (std::array::from_fn(|k| rdf(blob, o + 4 * k)), std::array::from_fn(|k| rdf(blob, o + 16 + 4 * k)));
+                roots.push((n, Aabb { lo: std::array::from_fn(|k| origin[k] - half[k]), hi: std::array::from_fn(|k| origin[k] + half[k]) }, by_node[&n]));
+            }
+        }
+        // brush models may list terrain trees too: their ranges move up with the old nodes and must still fit 16 bits
+        let cmodel_reach = (1..cm_n)
+            .map(|m| {
+                let o = rel(cm0) + 72 * m;
+                let (first, count) = (u16::from_le_bytes([blob[o + 32], blob[o + 33]]) as usize, u16::from_le_bytes([blob[o + 34], blob[o + 35]]) as usize);
+                if count > 0 { first + count } else { 0 }
+            })
+            .max()
+            .unwrap_or(0);
+        let mut cap = 16usize;
+        let (bsp, leaf_terrain) = loop {
+            let bsp = super::colltree::Bsp::build(&boxes, &world_boxes, cap);
+            // per leaf: the roots whose boxes touch its cell
+            let per_leaf: Vec<Vec<usize>> = bsp.leaves.iter().map(|l| (0..roots.len()).filter(|&k| roots[k].1.touches(&l.bounds)).collect()).collect();
+            let appended: usize = per_leaf.iter().map(Vec::len).sum();
+            if appended + cmodel_reach <= 65535 && per_leaf.iter().all(|p| p.len() <= 65535) {
+                break (bsp, per_leaf);
+            }
+            if cap > world_boxes.len().max(1) * 2 {
+                bail!("the terrain's {} tree roots cannot be listed by the leaves of any BSP within the 16-bit limit", roots.len());
+            }
+            cap *= 2;
+        };
+        let mut terrain_copies: Vec<u8> = Vec::new();
+        let terrain_k: usize = leaf_terrain.iter().map(Vec::len).sum();
+        let mut terrain_first = 0usize;
         // every node's plane is an axial one: look it up in the shared array, or append it
         let mut node_words: Vec<(usize, u32)> = Vec::new();
         let mut node_records: Vec<u8> = Vec::new();
@@ -365,12 +415,19 @@ pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource, o
             }
         }
         let mut leaf_records: Vec<u8> = Vec::new();
-        for l in &bsp.leaves {
+        for (li, l) in bsp.leaves.iter().enumerate() {
             let (root, all) = tree_for(l.members.clone(), &mut nodes);
-            leaf_records.extend_from_slice(&0u16.to_le_bytes());
-            leaf_records.extend_from_slice(&0u16.to_le_bytes());
+            let mine = &leaf_terrain[li];
+            let terrain_contents = mine.iter().fold(0u32, |c, &k| c | roots[k].2);
+            leaf_records.extend_from_slice(&(if mine.is_empty() { 0 } else { terrain_first as u16 }).to_le_bytes());
+            leaf_records.extend_from_slice(&(mine.len() as u16).to_le_bytes());
             leaf_records.extend_from_slice(&all.to_le_bytes());
-            leaf_records.extend_from_slice(&0u32.to_le_bytes());
+            leaf_records.extend_from_slice(&terrain_contents.to_le_bytes());
+            for &k in mine {
+                let o = rel(aabb_at) + 32 * roots[k].0;
+                terrain_copies.extend_from_slice(&blob[o..o + 32]);
+            }
+            terrain_first += mine.len();
             let mid: [f32; 3] = std::array::from_fn(|k| (l.bounds.lo[k] + l.bounds.hi[k]) * 0.5);
             let half: [f32; 3] = std::array::from_fn(|k| (l.bounds.hi[k] - l.bounds.lo[k]) * 0.5);
             for v in mid.iter().chain(half.iter()) {
@@ -378,6 +435,20 @@ pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource, o
             }
             leaf_records.extend_from_slice(&(root as u32).to_le_bytes());
         }
+        // the new array: the copies, then the old nodes, every link to a child moved up by the number of copies
+        let k = terrain_k as u32;
+        let mut array = std::mem::take(&mut terrain_copies);
+        array.extend_from_slice(&blob[rel(aabb_at)..rel(aabb_at) + 32 * aabb_n]);
+        for i in 0..array.len() / 32 {
+            let o = 32 * i;
+            if u16::from_le_bytes([array[o + 14], array[o + 15]]) > 0 {
+                let link = u32::from_le_bytes(array[o + 28..o + 32].try_into().unwrap()) + k;
+                array[o + 28..o + 32].copy_from_slice(&link.to_le_bytes());
+            }
+        }
+        terrain_extra = array;
+        terrain_total = aabb_n + terrain_k;
+        terrain_moved = terrain_k;
         bsp_nodes_len = node_records.len();
         bsp_counts = (bsp.nodes.len(), bsp.leaves.len());
         bsp_bytes.extend_from_slice(&node_records);
@@ -456,12 +527,29 @@ pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource, o
     if opts.rebuild_bsp {
         out.extend_from_slice(&blob[rel(r1)..rel(nodes0.0)]);
         out.extend_from_slice(&bsp_bytes);
-        out.extend_from_slice(&blob[rel(leafs_end_old)..]);
+        if r.rec.clip_terrain.aabbs.1 > 0 {
+            // the terrain arrays stay; the trees get the copies for the new leaves behind them
+            out.extend_from_slice(&blob[rel(leafs_end_old)..rel(r.rec.clip_terrain.aabbs.0)]);
+            out.extend_from_slice(&terrain_extra);
+            out.extend_from_slice(&blob[rel(aabbs_end_old)..]);
+        } else {
+            out.extend_from_slice(&blob[rel(leafs_end_old)..]);
+        }
     } else {
         out.extend_from_slice(&blob[rel(r1)..]);
     }
     // where an old stream offset ended up (the nodes and leaves are replaced as one piece, nothing is asked about their inside)
-    let shifted = |o: usize| -> usize { (rel(o) as i64 + delta + if opts.rebuild_bsp && o >= leafs_end_old { delta2 } else { 0 }) as usize };
+    let delta3 = terrain_extra.len() as i64 - 32 * r.rec.clip_terrain.aabbs.1 as i64;
+    let shifted = |o: usize| -> usize {
+        let mut v = rel(o) as i64 + delta;
+        if opts.rebuild_bsp && o >= leafs_end_old {
+            v += delta2;
+        }
+        if opts.rebuild_bsp && r.rec.clip_terrain.aabbs.1 > 0 && o >= aabbs_end_old {
+            v += delta3;
+        }
+        v as usize
+    };
     if opts.rebuild_bsp {
         // the nodes' plane words: literal addresses (they were queued with their offsets inside the node array)
         let nodes_at = rel(nodes0.0) + delta as usize;
@@ -470,6 +558,17 @@ pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource, o
         }
         put32(&mut out, rel(c.header) + 84, bsp_counts.0 as u32);
         put32(&mut out, rel(c.header) + 92, bsp_counts.1 as u32);
+        if r.rec.clip_terrain.aabbs.1 > 0 {
+            put32(&mut out, rel(c.header) + 136, terrain_total as u32);
+            // brush models' own terrain trees: their ranges move up with the old nodes
+            for m in 1..cm_n {
+                let o = shifted(cm0) + 72 * m;
+                let (first, count) = (u16::from_le_bytes([out[o + 32], out[o + 33]]) as usize, u16::from_le_bytes([out[o + 34], out[o + 35]]) as usize);
+                if count > 0 {
+                    out[o + 32..o + 34].copy_from_slice(&((first + terrain_moved) as u16).to_le_bytes());
+                }
+            }
+        }
         let _ = bsp_nodes_len;
     }
 

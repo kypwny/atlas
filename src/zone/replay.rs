@@ -201,6 +201,16 @@ pub struct ClipRec {
     pub material_names: Vec<Option<String>>,
 }
 
+/// Where the terrain arrays of a collision map sit in the zone image.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClipTerrain {
+    pub verts: (usize, usize),
+    pub tris: (usize, usize),
+    pub borders: (usize, usize),
+    pub partitions: (usize, usize),
+    pub aabbs: (usize, usize),
+}
+
 /// Everything the walk observes about models, materials and images.
 /// Game data stored in zones that is plain content rather than geometry: what the data tables are made from.
 #[derive(Debug, Clone)]
@@ -236,6 +246,9 @@ pub struct Recorder {
     pub clip_leafs: (usize, usize),
     /// (offset, count) of the collision map's 8-byte `cNode_t` records (plane pointer, two children).
     pub clip_nodes: (usize, usize),
+    /// (offset, count) of the collision map's terrain arrays: 12-byte vertices, 6-byte triangles, 28-byte borders, 12-byte
+    /// partitions, 32-byte aabb tree nodes. 0 when an array is not inline.
+    pub clip_terrain: ClipTerrain,
     /// Offset of the 64-byte second `ClipInfo` header behind the pointer at clipMap +72 (0 when the pointer only aliases).
     pub clip_pinfo: usize,
     /// With `Replay::record_addresses(true)`: (block address, stream offset, length) of every array the walk read, in order.

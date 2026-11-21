@@ -219,6 +219,20 @@ fn model_box(m: &StaticModel) -> (V3, [V3; 3], V3) {
     (m.origin, m.axis, [10.0 * s, 10.0 * s, 10.0 * s])
 }
 
+/// The terrain collision as one layer: flat shaded triangles, tinted by material.
+pub fn terrain_layer(t: &super::terrain::Terrain) -> Layer {
+    let mut mesh = Mesh::default();
+    for tri in t.triangles() {
+        let p: [V3; 3] = std::array::from_fn(|i| [tri.p[i][0] as f64, tri.p[i][1] as f64, tri.p[i][2] as f64]);
+        let n = unit(cross(sub(p[1], p[0]), sub(p[2], p[0])));
+        // a tint per material, from its number: earth tones that differ from the brush layers' colours
+        let h = (tri.material as u32).wrapping_mul(2654435761);
+        let color = [150 + (h >> 24) as u8 % 90, 120 + (h >> 16) as u8 % 90, 70 + (h >> 8) as u8 % 60, 255];
+        mesh.polygon(&p, n, color);
+    }
+    Layer { name: "collision: terrain", surface: mesh.into_surface() }
+}
+
 /// Every layer of a map: collision brushes of the world, brushes of brush models, static models and the entity groups.
 pub fn layers(m: &MapSource) -> Vec<Layer> {
     let mut out = Vec::new();

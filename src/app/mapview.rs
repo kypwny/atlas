@@ -18,7 +18,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 type MapResult = Result<(Model, Vec<String>, Vec<SurfaceTextures>, MapLights), String>;
 /// What the reading thread sends back: the map, and the collision brushes / static models / entities when the zone has them.
-type MapMessage = (MapResult, Option<MapSource>);
+type MapMessage = (MapResult, Option<MapSource>, Option<mapscene::Layer>);
 
 enum Tex {
     Loading,
@@ -188,15 +188,16 @@ fn load_map(path: &std::path::Path, root: &std::path::Path) -> Result<(Model, Ve
 }
 
 /// The editable source of a map (collision brushes, static models, entities) when the zone is a CoDOL QA / 3.19 one.
-fn load_source(path: &std::path::Path, root: &std::path::Path) -> Option<MapSource> {
-    let peek = fastfile::peek(path).ok()?;
+fn load_source(path: &std::path::Path, root: &std::path::Path) -> (Option<MapSource>, Option<mapscene::Layer>) {
+    let Ok(peek) = fastfile::peek(path) else { return (None, None) };
     if peek.version != fastfile::VERSION_QA && peek.version != fastfile::VERSION_319 {
-        return None;
+        return (None, None);
     }
-    let key = zexport::find_key(root).ok()?;
-    let zone = Zone::open(path, &key).ok()?;
+    let Ok(key) = zexport::find_key(root) else { return (None, None) };
+    let Ok(zone) = Zone::open(path, &key) else { return (None, None) };
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    crate::zone::mapsrc::read(&zone, &name).ok()
+    let terrain = crate::zone::terrain::read(&zone).ok().map(|t| mapscene::terrain_layer(&t));
+    (crate::zone::mapsrc::read(&zone, &name).ok(), terrain)
 }
 
 impl App {
@@ -218,15 +219,15 @@ impl App {
         log::log(format!("reading the map of {name}"));
         std::thread::spawn(move || {
             let r = load_map(&path, &root).map_err(|e| format!("{e:#}"));
-            let source = if r.is_ok() { load_source(&path, &root) } else { None };
-            let _ = tx.send((r, source));
+            let (source, terrain) = if r.is_ok() { load_source(&path, &root) } else { (None, None) };
+            let _ = tx.send((r, source, terrain));
             ctx.request_repaint();
         });
     }
 
     fn poll_mapview(&mut self) {
         let Some(rx) = &self.mapview.rx else { return };
-        let Ok((result, source)) = rx.try_recv() else { return };
+        let Ok((result, source, terrain)) = rx.try_recv() else { return };
         self.mapview.rx = None;
         match result {
             Ok((mut model, mut names, textures, lights)) => {
@@ -252,7 +253,7 @@ impl App {
                 // the editor layers go behind the world's surfaces (after the framing above, which only looks at the world); the point
                 // entities and static models start on, the collision solids off (they lie on top of the drawn world)
                 if let Some(src) = &source {
-                    for layer in mapscene::layers(src) {
+                    for layer in mapscene::layers(src).into_iter().chain(terrain) {
                         let triangles = layer.surface.indices.len() / 3;
                         if triangles == 0 {
                             continue;

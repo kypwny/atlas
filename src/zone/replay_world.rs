@@ -804,11 +804,17 @@ impl<'a> Replay<'a> {
         }
         if self.rd32(h + 104) != 0 {
             let n = self.rd32(h + 100);
-            self.bytes(n, 12, 4)?;
+            let at = self.bytes(n, 12, 4)?;
+            if self.apply {
+                self.rec.clip_terrain.verts = (at, n as usize);
+            }
         }
         if self.rd32(h + 112) != 0 {
             let n = self.rd32(h + 108);
-            self.bytes(n, 6, 2)?;
+            let at = self.bytes(n, 6, 2)?;
+            if self.apply {
+                self.rec.clip_terrain.tris = (at, n as usize);
+            }
         }
         if self.rd32(h + 116) != 0 {
             let n = ((3u32.wrapping_mul(self.rd32(h + 108)).wrapping_add(31)) >> 3) & !3;
@@ -816,11 +822,17 @@ impl<'a> Replay<'a> {
         }
         if self.rd32(h + 124) != 0 {
             let n = self.rd32(h + 120);
-            self.bytes(n, 28, 4)?;
+            let at = self.bytes(n, 28, 4)?;
+            if self.apply {
+                self.rec.clip_terrain.borders = (at, n as usize);
+            }
         }
         if self.rd32(h + 132) != 0 {
             let n = self.rd32(h + 128);
             let records = self.bytes(n, 12, 4)?;
+            if self.apply {
+                self.rec.clip_terrain.partitions = (records, n as usize);
+            }
             for i in 0..n as usize {
                 if self.ptr(records + 12 * i + 8) == INLINE {
                     self.bytes(1, 28, 4)?;
@@ -829,7 +841,10 @@ impl<'a> Replay<'a> {
         }
         if self.rd32(h + 140) != 0 {
             let n = self.rd32(h + 136);
-            self.bytes(n, 32, 16)?;
+            let at = self.bytes(n, 32, 16)?;
+            if self.apply {
+                self.rec.clip_terrain.aabbs = (at, n as usize);
+            }
         }
         if self.rd32(h + 148) != 0 {
             let n = self.rd32(h + 144);

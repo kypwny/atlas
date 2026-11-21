@@ -296,6 +296,31 @@ fn a_rebuilt_bsp_reaches_every_brush() {
             }
         }
     }
+    // the terrain collision is still reached from the new leaves: the same partitions, the same triangles
+    let (t0, t1) = (atlas::zone::terrain::read(&zone).unwrap(), atlas::zone::terrain::read(&after).unwrap());
+    let ids = |t: &atlas::zone::terrain::Terrain| -> Vec<u32> { t.reachable_partitions().into_iter().map(|p| p.0).collect() };
+    assert_eq!(ids(&t0), ids(&t1), "terrain partitions reached from the BSP changed");
+    assert_eq!(t0.triangles().len(), t1.triangles().len());
+    assert!(t1.nodes.len() > t0.nodes.len(), "no tree roots were copied for the new leaves");
+    // the roots the new leaves list are the old roots (no more, no fewer), and each sits in leaves its box touches
+    let root_set = |t: &atlas::zone::terrain::Terrain| -> std::collections::BTreeSet<[u32; 6]> {
+        let mut set = std::collections::BTreeSet::new();
+        for &(first, count) in &t.leaf_ranges {
+            for c in first as usize..first as usize + count as usize {
+                let n = &t.nodes[c];
+                set.insert([n.origin[0].to_bits(), n.origin[1].to_bits(), n.origin[2].to_bits(), n.half[0].to_bits(), n.half[1].to_bits(), n.half[2].to_bits()]);
+            }
+        }
+        set
+    };
+    assert_eq!(root_set(&t0), root_set(&t1), "the terrain tree roots the leaves list changed");
+    for (l, &(first, count)) in t1.leaf_ranges.iter().enumerate() {
+        for c in first as usize..first as usize + count as usize {
+            let n = &t1.nodes[c];
+            let b = &t.bsp.leaves[l].bounds;
+            assert!((0..3).all(|k| n.origin[k] - n.half[k] <= b.hi[k] && b.lo[k] <= n.origin[k] + n.half[k]), "leaf {l} lists a terrain tree that does not touch it");
+        }
+    }
     // everything but the BSP and brushes is as it was
     let a = mapsrc::read(&after, name).unwrap();
     assert_eq!(a.models.len(), orig.models.len());
