@@ -33,6 +33,8 @@ usage:
   atlas --dds2iwi IN.dds OUT.iwi [--usage color|normal|ui|clamp|raw] [--flags HEX] [--genmips]
   atlas --iwi2dds IN.iwi OUT.dds          (wavelet images are decompressed)
   atlas --modelcheck GAME_FOLDER          parse every streamed model, report problems
+  atlas --rendermap GAME_FOLDER ZONE.ff OUT.png [--layers all|none|brush,static,..] [--world] [--size WxH] [--shading lit|color|normals|surfaces] [--yaw D] [--pitch D] [--zoom F] [--wire]
+                                          the editor layers of a map (collision brushes, static model boxes, entity markers), rendered without a window
   atlas --rendermodel GAME_FOLDER NAME OUT.png [--size WxH] [--shading lit|normals|uv|uvcolor|color|surfaces]
                 [--cull none|back|front] [--wire] [--yaw DEG] [--pitch DEG] [--no-normal] [--no-spec] [--index MODEL_INDEX.tsv]
                                                       render a model without a window (textured when an index is given)
@@ -388,6 +390,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("--rendermodel") => rendermodel(&args[1..]),
+        Some("--rendermap") => rendermap(&args[1..]),
         Some("--modelcheck") => modelcheck(path_arg(&args, 1)?),
         Some("--zoneinfo") => zoneinfo(&args[1..]),
         Some("--zoneindex") => zoneindex(&args[1..]),
@@ -1005,6 +1008,106 @@ fn rendermodel(args: &[String]) -> Result<()> {
     let (w, h, px) = v.read_back().context("read-back failed")?;
     image::save_buffer(out, &px, w, h, image::ColorType::Rgba8)?;
     println!("{}: {} surfaces, {} vertices, {} triangles, bounds {:?}..{:?} -> {out}", m.name, m.surfaces.len(), m.vertex_count(), m.triangle_count(), lo, hi);
+    Ok(())
+}
+
+/// `atlas --rendermap GAME_FOLDER ZONE.ff OUT.png [--layers all|none|a,b] [--world] [--size WxH] [--shading ..] [--yaw D] [--pitch D] [--zoom F] [--wire]`:
+/// the editor layers of a map (collision brushes, static model boxes, entity markers) rendered without a window. `--layers` takes
+/// substrings of the layer names (`brush`, `static`, `spawns`, ..); the world surfaces are drawn only with `--world`.
+fn rendermap(args: &[String]) -> Result<()> {
+    let (Some(root), Some(zone_name), Some(out)) = (args.first(), args.get(1), args.get(2)) else { bail!("{USAGE}") };
+    let (mut size, mut shading, mut wire, mut world_on) = ((1280u32, 800u32), viewer::Shading::Lit, false, false);
+    let (mut layers_arg, mut yaw, mut pitch, mut zoom) = ("all".to_string(), None::<f32>, None::<f32>, 1.0f32);
+    let mut i = 3;
+    while i < args.len() {
+        let option = args[i].clone();
+        let mut value = || -> Result<String> {
+            i += 1;
+            args.get(i).cloned().context("option needs a value")
+        };
+        match option.as_str() {
+            "--size" => {
+                let v = value()?;
+                let (w, h) = v.split_once('x').context("--size WxH")?;
+                size = (w.parse()?, h.parse()?);
+            }
+            "--layers" => layers_arg = value()?,
+            "--world" => world_on = true,
+            "--wire" => wire = true,
+            "--zoom" => zoom = value()?.parse()?,
+            "--yaw" => yaw = Some(value()?.parse::<f32>()?.to_radians()),
+            "--pitch" => pitch = Some(value()?.parse::<f32>()?.to_radians()),
+            "--shading" => {
+                shading = match value()?.as_str() {
+                    "lit" => viewer::Shading::Lit,
+                    "color" => viewer::Shading::VertexColor,
+                    "normals" => viewer::Shading::Normals,
+                    "surfaces" => viewer::Shading::Surfaces,
+                    "textured" => viewer::Shading::Textured,
+                    o => bail!("unknown shading {o}"),
+                }
+            }
+            o => bail!("unknown option {o}"),
+        }
+        i += 1;
+    }
+    let root = PathBuf::from(root);
+    let key = zone::export::find_key(&root)?;
+    let path = zone::export::zone_files(&root).into_iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(zone_name))).context("no such zone")?;
+    let z = zone::Zone::open(&path, &key)?;
+    let src = zone::mapsrc::read(&z, zone_name)?;
+    let mut model = zone::world::model_of_zone(&z).map(|m| m.0).unwrap_or(model::Model { name: zone_name.clone(), surfaces: Vec::new() });
+    let world_surfaces = model.surfaces.len();
+    let layers = zone::mapscene::layers(&src);
+    let mut visible = vec![world_on; world_surfaces];
+    for l in layers {
+        let on = match layers_arg.as_str() {
+            "all" => true,
+            "none" => false,
+            list => list.split(',').any(|t| l.name.contains(t)),
+        };
+        println!("{:<28} {:>8} vertices {:>8} triangles{}", l.name, l.surface.vertices.len(), l.surface.indices.len() / 3, if on { "" } else { "  (hidden)" });
+        visible.push(on);
+        model.surfaces.push(l.surface);
+    }
+    // frame the middle 70% of what is shown (props far outside the play area would otherwise push the camera away)
+    let mut axes: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for (s, _) in model.surfaces.iter().zip(&visible).filter(|(_, v)| **v) {
+        for v in s.vertices.iter().step_by(7) {
+            for a in 0..3 {
+                axes[a].push(v.pos[a]);
+            }
+        }
+    }
+    if axes[0].is_empty() {
+        bail!("nothing to draw: no layer matches {layers_arg:?}");
+    }
+    let (mut lo, mut hi) = ([0f32; 3], [0f32; 3]);
+    for a in 0..3 {
+        axes[a].sort_by(|x, y| x.total_cmp(y));
+        let n = axes[a].len();
+        let (a0, a1) = (axes[a][n * 15 / 100], axes[a][(n * 85 / 100).min(n - 1)]);
+        let pad = (a1 - a0) * 0.25;
+        lo[a] = a0 - pad;
+        hi[a] = a1 + pad;
+    }
+    let mut cam = viewer::Camera::default();
+    println!("framing {lo:?} .. {hi:?}");
+    cam.fit(lo, hi);
+    if let Some(y) = yaw {
+        cam.yaw = y;
+    }
+    if let Some(p) = pitch {
+        cam.pitch = p;
+    }
+    cam.dist /= zoom;
+    let mut v = viewer::Viewer::headless()?;
+    let tex: Vec<modelindex::SurfaceTextures> = vec![Default::default(); model.surfaces.len()];
+    v.set_model(Some(&model), &tex, &[], &[]);
+    v.render(size, &cam, shading, viewer::Cull::None, wire, &visible);
+    let (w, h, px) = v.read_back().context("read-back failed")?;
+    image::save_buffer(out, &px, w, h, image::ColorType::Rgba8)?;
+    println!("{zone_name}: {} entities, {} world brushes, {} brush models, {} static models -> {out}", src.entities.len(), src.world.len(), src.submodels.len(), src.models.len());
     Ok(())
 }
 

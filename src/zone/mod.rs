@@ -24,6 +24,7 @@ pub mod fastfile;
 pub mod hq;
 pub mod export_map;
 pub mod mapsrc;
+pub mod mapscene;
 pub mod replay;
 pub mod stock;
 pub mod t6;

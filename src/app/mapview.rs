@@ -6,6 +6,8 @@ use crate::model::Model;
 use crate::modelindex::SurfaceTextures;
 use crate::modeltex::{self, TexImage};
 use crate::viewer::{self, Camera, Cull, LightClass, LightMarker, LightView, Shading, Viewer};
+use crate::zone::mapscene;
+use crate::zone::mapsrc::MapSource;
 use crate::zone::world::{LightKind, MapLights};
 use crate::zone::{Zone, export as zexport, fastfile, stock, world};
 use anyhow::{Context, Result};
@@ -15,6 +17,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 
 type MapResult = Result<(Model, Vec<String>, Vec<SurfaceTextures>, MapLights), String>;
+/// What the reading thread sends back: the map, and the collision brushes / static models / entities when the zone has them.
+type MapMessage = (MapResult, Option<MapSource>);
 
 enum Tex {
     Loading,
@@ -48,7 +52,9 @@ pub(super) struct MapView {
     tex_state: std::collections::HashMap<String, Tex>,
     tex_rx: Option<Receiver<(String, Result<TexImage, String>)>>,
     tex_tx: Option<std::sync::mpsc::Sender<(String, Result<TexImage, String>)>>,
-    pub(super) rx: Option<Receiver<MapResult>>,
+    pub(super) rx: Option<Receiver<MapMessage>>,
+    /// The editor layers appended after the world's surfaces: (name, surface index, triangle count). `visible[index]` switches one.
+    layers: Vec<(&'static str, usize, usize)>,
 }
 
 impl MapView {
@@ -63,6 +69,14 @@ impl MapView {
                 "types" => self.light_mask = LightClass::ALL.iter().filter(|c| v.split('+').any(|t| t == c.name())).fold(0, |m, c| m | c.bit()),
                 "light" => self.light_pin = v.parse().ok(),
                 "wire" => self.wire = v == "1",
+                "layers" => {
+                    // `layers=brush+static` switches the editor layers whose name contains one of the words on ("all", "none")
+                    for (name, idx, _) in &self.layers {
+                        if let Some(on) = self.visible.get_mut(*idx) {
+                            *on = v == "all" || (v != "none" && v.split('+').any(|t| name.contains(t)));
+                        }
+                    }
+                }
                 "shading" => self.shading = Shading::ALL.iter().find(|(_, n)| n.to_ascii_lowercase().replace(' ', "") == v).map_or(self.shading, |x| x.0),
                 "yaw" => self.camera.yaw = v.parse::<f32>().unwrap_or(0.0).to_radians(),
                 "pitch" => self.camera.pitch = v.parse::<f32>().unwrap_or(0.0).to_radians(),
@@ -80,7 +94,7 @@ impl MapView {
 
 impl Default for MapView {
     fn default() -> Self {
-        MapView { active: false, title: String::new(), viewer: None, camera: Camera::default(), model: None, names: Vec::new(), uploaded: false, shading: Shading::Textured, cull: Cull::None, wire: false, visible: Vec::new(), lights: MapLights::default(), markers: Vec::new(), show_lights: false, light_mask: 0xF, light_pin: None, light_hover: None, marker_info: Vec::new(), pending_view: crate::config::env_var("VIEW").ok(), surface_tex: Vec::new(), tex_state: Default::default(), tex_rx: None, tex_tx: None, rx: None }
+        MapView { active: false, title: String::new(), viewer: None, camera: Camera::default(), model: None, names: Vec::new(), uploaded: false, shading: Shading::Textured, cull: Cull::None, wire: false, visible: Vec::new(), lights: MapLights::default(), markers: Vec::new(), show_lights: false, light_mask: 0xF, light_pin: None, light_hover: None, marker_info: Vec::new(), pending_view: crate::config::env_var("VIEW").ok(), surface_tex: Vec::new(), tex_state: Default::default(), tex_rx: None, tex_tx: None, rx: None, layers: Vec::new() }
     }
 }
 
@@ -173,6 +187,18 @@ fn load_map(path: &std::path::Path, root: &std::path::Path) -> Result<(Model, Ve
     world::map_of_zone(&zone).context("the zone has no world")
 }
 
+/// The editable source of a map (collision brushes, static models, entities) when the zone is a CoDOL QA / 3.19 one.
+fn load_source(path: &std::path::Path, root: &std::path::Path) -> Option<MapSource> {
+    let peek = fastfile::peek(path).ok()?;
+    if peek.version != fastfile::VERSION_QA && peek.version != fastfile::VERSION_319 {
+        return None;
+    }
+    let key = zexport::find_key(root).ok()?;
+    let zone = Zone::open(path, &key).ok()?;
+    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    crate::zone::mapsrc::read(&zone, &name).ok()
+}
+
 impl App {
     /// Reads the map of the zone at `path` in the background and shows it when it is ready.
     pub(super) fn open_map(&mut self, path: PathBuf, name: String) {
@@ -185,23 +211,25 @@ impl App {
         self.mapview.uploaded = false;
         self.mapview.markers.clear();
         self.mapview.marker_info.clear();
+        self.mapview.layers.clear();
         self.mapview.lights = MapLights::default();
         self.mapview.light_pin = None;
         self.mapview.rx = Some(rx);
         log::log(format!("reading the map of {name}"));
         std::thread::spawn(move || {
             let r = load_map(&path, &root).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(r);
+            let source = if r.is_ok() { load_source(&path, &root) } else { None };
+            let _ = tx.send((r, source));
             ctx.request_repaint();
         });
     }
 
     fn poll_mapview(&mut self) {
         let Some(rx) = &self.mapview.rx else { return };
-        let Ok(result) = rx.try_recv() else { return };
+        let Ok((result, source)) = rx.try_recv() else { return };
         self.mapview.rx = None;
         match result {
-            Ok((model, names, textures, lights)) => {
+            Ok((mut model, mut names, textures, lights)) => {
                 self.mapview.surface_tex = textures;
                 self.mapview.tex_state.clear();
                 let (tx, rx) = channel();
@@ -220,6 +248,23 @@ impl App {
                 log::log(format!("map {}: {} primary lights, {} hero lights", self.mapview.title, lights.primary.iter().filter(|l| l.kind != LightKind::Other).count(), lights.hero.len()));
                 (self.mapview.markers, self.mapview.marker_info) = markers_of(&lights, centre, extent * 0.3);
                 self.mapview.lights = lights;
+                let mut visible = visible;
+                // the editor layers go behind the world's surfaces (after the framing above, which only looks at the world); the point
+                // entities and static models start on, the collision solids off (they lie on top of the drawn world)
+                if let Some(src) = &source {
+                    for layer in mapscene::layers(src) {
+                        let triangles = layer.surface.indices.len() / 3;
+                        if triangles == 0 {
+                            continue;
+                        }
+                        let on = layer.name.starts_with("entities") && layer.name != "entities: path nodes" || layer.name == "static models";
+                        self.mapview.layers.push((layer.name, model.surfaces.len(), triangles));
+                        names.push(format!("[{}]", layer.name));
+                        visible.push(on);
+                        model.surfaces.push(layer.surface);
+                    }
+                    log::log(format!("map {}: {} collision brushes, {} brush models, {} static models, {} entities", self.mapview.title, src.world.len(), src.submodels.len(), src.models.len(), src.entities.len()));
+                }
                 self.mapview.visible = visible;
                 self.mapview.names = names;
                 self.mapview.model = Some(Arc::new(model));
@@ -327,6 +372,11 @@ impl App {
                     if ui.checkbox(&mut on, label).changed() {
                         mv.light_mask = (mv.light_mask & !c.bit()) | if on { c.bit() } else { 0 };
                     }
+                }
+            }
+            for (name, idx, triangles) in &mv.layers {
+                if let Some(on) = mv.visible.get_mut(*idx) {
+                    ui.checkbox(on, format!("{name} ({triangles})")).on_hover_text("An editor layer: what the map is made of for an editor, drawn as flat coloured solids and markers.");
                 }
             }
             if ui.button("Reset view").clicked() {
