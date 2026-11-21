@@ -1454,6 +1454,9 @@ impl<'a> Replay<'a> {
         if self.stock {
             return self.stock_weapon();
         }
+        if self.v319() {
+            return self.weapon_461();
+        }
         if !self.qa() {
             return Err(self.fail("weapon layout of this fastfile version is not supported"));
         }
@@ -1557,6 +1560,128 @@ impl<'a> Replay<'a> {
         if self.apply {
             let record = self.src[h..h + 0xe28].to_vec();
             self.rec.data.push(DataRec::Weapon { name: record_name, display, record });
+        }
+        self.pop()
+    }
+
+    /// The 3.19 (461) weapon: one 4124-byte record, then its dependencies in the order the 3.19 loader reads them (the same
+    /// table as the server's `replay_weapon_461`). Script-string ids stream nothing; the two point graphs take their counts
+    /// from the 16-bit words at +0xEC4 and +0xEC6; five entries at +1688 are sound alias assets rather than names.
+    fn weapon_461(&mut self) -> Res {
+        #[derive(Clone, Copy, PartialEq)]
+        enum F {
+            Str,
+            Model,
+            Effect,
+            Material,
+            Sound,
+            SoundArray,
+            SoundList,
+            Points4,
+            Points6,
+            Physics,
+            Preset,
+            Tracer,
+        }
+        use F::*;
+        const SIZE: usize = 4124;
+        const FIELDS: &[(usize, usize, F)] = &[
+            (0, 4, Str),
+            (16, 10, Model),
+            (124, 62, Str),
+            (372, 62, Str),
+            (620, 62, Str),
+            (1028, 16, Effect),
+            (1124, 16, Effect),
+            (1188, 16, Effect),
+            (1316, 16, Effect),
+            (1444, 5, Effect),
+            (1464, 1, Str),
+            (1472, 1, Str),
+            (1476, 53, Sound),
+            (1688, 5, SoundList),
+            (1708, 2, SoundArray),
+            (1716, 4, Effect),
+            (1732, 2, Material),
+            (1952, 6, Material),
+            (1980, 1, Material),
+            (1988, 1, Material),
+            (2000, 4, Material),
+            (2024, 1, Str),
+            (2032, 1, Str),
+            (2048, 1, Str),
+            (2332, 4, Material),
+            (2544, 1, Physics),
+            (2548, 1, Preset),
+            (2656, 1, Model),
+            (2664, 2, Effect),
+            (2672, 2, Sound),
+            (2952, 2, Effect),
+            (2984, 1, Effect),
+            (2988, 1, Sound),
+            (2992, 5, Effect),
+            (3196, 1, Str),
+            (3204, 1, Points4),
+            (3200, 1, Str),
+            (3208, 1, Points6),
+            (3292, 2, Str),
+            (3328, 2, Str),
+            (3488, 2, Str),
+            (3496, 3, Tracer),
+            (3532, 1, Sound),
+            (3536, 1, Effect),
+            (3540, 1, Str),
+            (3556, 1, Sound),
+            (3560, 4, Sound),
+            (3576, 4, Sound),
+            (3592, 2, Sound),
+            (3664, 6, Sound),
+            (3716, 1, Str),
+            (3732, 2, Str),
+            (3744, 4, Material),
+            (3784, 1, Points4),
+            (3788, 1, Points6),
+            (3880, 3, Str),
+            (4000, 1, Str),
+            (4016, 1, Str),
+        ];
+        let h = self.pos;
+        self.reserve(0, SIZE, 4, true)?;
+        self.push(3)?;
+        for &(base, n, kind) in FIELDS {
+            for j in 0..n {
+                let offset = base + 4 * j;
+                let r = self.ptr(h + offset);
+                match kind {
+                    Str => {
+                        if r == INLINE {
+                            self.string()?;
+                        }
+                    }
+                    Model => self.asset_reference(r, Kind::Model)?,
+                    Effect => self.asset_reference(r, Kind::Effect)?,
+                    Material => self.asset_reference(r, Kind::Material)?,
+                    Physics => self.asset_reference(r, Kind::PhysMap)?,
+                    Preset => self.asset_reference(r, Kind::Preset)?,
+                    Tracer => self.asset_reference(r, Kind::Tracer)?,
+                    Sound => self.sound_name(r)?,
+                    SoundList => self.asset_reference(r, Kind::SoundAlias)?,
+                    SoundArray => {
+                        if r == INLINE {
+                            let names = self.bytes(31, 4, 4)?;
+                            for k in 0..31 {
+                                self.sound_name(self.rd32(names + 4 * k))?;
+                            }
+                        }
+                    }
+                    Points4 | Points6 => {
+                        if r == INLINE {
+                            let n = self.rd16(h + if kind == Points4 { 0xec4 } else { 0xec6 });
+                            self.bytes(n, 8, 4)?;
+                        }
+                    }
+                }
+            }
         }
         self.pop()
     }
