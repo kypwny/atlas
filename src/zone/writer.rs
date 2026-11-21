@@ -96,6 +96,14 @@ impl ZoneBuilder {
         a.fresh = true;
     }
 
+    /// Replaces an asset's bytes with an edit that keeps its structure (the same arrays in the same order, only some of them
+    /// longer or shorter, such as a text nested in it). The asset stays "not fresh": its own pointers move with whatever it
+    /// grew past, and what points into it follows its allocations. `build` refuses the result when the number of block-3
+    /// allocations of the asset changed.
+    pub fn replace_same_layout(&mut self, index: usize, bytes: Vec<u8>) {
+        self.assets[index].bytes = bytes;
+    }
+
     pub fn remove(&mut self, index: usize) {
         self.assets.remove(index);
     }

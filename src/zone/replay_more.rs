@@ -73,7 +73,10 @@ impl<'a> Replay<'a> {
         }
         if self.rd32(h + 4) != 0 {
             let n = self.rd32(h + 8);
-            self.bytes(n, 1, 1)?;
+            let at = self.bytes(n, 1, 1)?;
+            if self.apply {
+                self.rec.map_ents.push((h, at, n as usize));
+            }
         }
         for i in 0..3 {
             if self.rd32(h + 16 + 8 * i) != 0 {

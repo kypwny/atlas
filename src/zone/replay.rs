@@ -168,6 +168,31 @@ pub struct WorldRec {
     pub static_models: Vec<(usize, Option<String>)>,
 }
 
+/// Where the arrays of a QA / 3.19 collision map's first `ClipInfo` sit in the zone image, as the walk met them. Offsets are stream
+/// offsets. Pointer words that refer to earlier data (a brush side's plane) are followed with `Recorder::addrs`.
+#[derive(Debug, Clone, Default)]
+pub struct ClipRec {
+    /// Whose collision info this is: 0 the map's own, 1 the second one behind a pointer, 100 + i the one of sub model i.
+    pub tag: u32,
+    /// Offset of the 256-byte clipMap_t header in the image.
+    pub header: usize,
+    /// (offset, count) of the 20-byte planes, 12-byte materials, 8-byte brush sides, 36-byte brushes.
+    pub planes: (usize, usize),
+    pub materials: (usize, usize),
+    pub sides: (usize, usize),
+    pub brushes: (usize, usize),
+    /// (offset, count) of the 20-byte leaf-brush nodes and the 2-byte leaf brush indices.
+    pub lb_nodes: (usize, usize),
+    pub leaf_brushes: (usize, usize),
+    /// Stream offset of the inline brush index array of each leaf-brush node (0 when the node has none or points elsewhere).
+    pub lb_inline: Vec<usize>,
+    /// Offsets of the 24-byte brush bounds and the 4-byte brush contents (one per brush); 0 when absent.
+    pub bounds: usize,
+    pub contents: usize,
+    /// Material names, in order (`None` when the name is a reference).
+    pub material_names: Vec<Option<String>>,
+}
+
 /// Everything the walk observes about models, materials and images.
 /// Game data stored in zones that is plain content rather than geometry: what the data tables are made from.
 #[derive(Debug, Clone)]
@@ -190,6 +215,15 @@ pub enum DataRec {
 pub struct Recorder {
     /// The map's geometry, when the zone has a world.
     pub world: Option<WorldRec>,
+    /// The collision map's brushes, planes and materials (QA / 3.19 layout only): one record per `ClipInfo` the walk met.
+    pub clips: Vec<ClipRec>,
+    /// (stream offset of the header, of the text, length including the NUL) of every entity string met: the map's own is nested in
+    /// its collision map.
+    pub map_ents: Vec<(usize, usize, usize)>,
+    /// (offset, count) of the 72-byte `cmodel_t` records of the collision map (model 0 is the world, `*N` entities use model N).
+    pub cmodels: (usize, usize),
+    /// With `Replay::record_addresses(true)`: (block address, stream offset, length) of every array the walk read, in order.
+    pub addrs: Vec<(u32, usize, usize)>,
     /// The map's lights: the Com world's primary lights and the GfxWorld's hero lights.
     pub lights: super::world::MapLights,
     /// String tables, localised strings and raw files, in zone order.
@@ -259,6 +293,11 @@ pub struct Replay<'a> {
     /// For each entry of `allocs3`: the stream offset the allocation started at and whether it consumed stream bytes.
     allocs3_info: Vec<(usize, bool)>,
     cur_asset: usize,
+    /// While true, `clip_note` records into the collision-map record.
+    pub(super) clip_on: bool,
+    record_addrs: bool,
+    pub(super) clip_tag: u32,
+    pub(super) clip_header: usize,
 }
 
 pub(super) fn align4(v: usize) -> usize {
@@ -316,6 +355,10 @@ impl<'a> Replay<'a> {
             allocs3: Vec::new(),
             allocs3_info: Vec::new(),
             cur_asset: usize::MAX,
+            clip_on: false,
+            record_addrs: false,
+            clip_tag: 0,
+            clip_header: 0,
         };
         r.rec.cur_img_start = vec![-1; 256];
         r.rec.cur_img_ref = vec![0; 256];
@@ -500,13 +543,22 @@ impl<'a> Replay<'a> {
     }
 
     /// Consumes `count * stride` bytes into the active block; returns where they start in the image.
+    /// Makes the walk note the block address and stream offset of every array it reads (`rec.addrs`), so a pointer word can be
+    /// turned into an image offset afterwards. Off by default: it costs memory.
+    pub fn record_addresses(&mut self, on: bool) {
+        self.record_addrs = on;
+    }
+
     pub(super) fn bytes(&mut self, count: u32, stride: usize, alignment: usize) -> Res<usize> {
         if self.pos > self.end || count as usize > (self.end - self.pos) / stride {
             return Err(self.fail("array runs past the asset"));
         }
         let start = self.pos;
         let a = self.active;
-        self.reserve(a, count as usize * stride, alignment, true)?;
+        let address = self.reserve(a, count as usize * stride, alignment, true)?;
+        if self.record_addrs && self.apply {
+            self.rec.addrs.push((address, start, count as usize * stride));
+        }
         Ok(start)
     }
 
@@ -521,7 +573,7 @@ impl<'a> Replay<'a> {
         Ok(())
     }
 
-    fn cstr(&self, off: usize) -> Option<String> {
+    pub(super) fn cstr(&self, off: usize) -> Option<String> {
         let n = self.src[off..].iter().position(|&c| c == 0)?;
         let bytes = &self.src[off..off + n];
         // the Chinese builds store their text in GBK
@@ -646,8 +698,12 @@ impl<'a> Replay<'a> {
                     if self.rd32(brush + 28) != 0 {
                         let sides = self.bytes(n, 8, 4)?;
                         for j in 0..n as usize {
-                            if self.rd32(sides + 8 * j) == INLINE {
+                            let plane = self.rd32(sides + 8 * j);
+                            if plane == INLINE {
                                 self.bytes(1, 20, 4)?;
+                            } else if plane != 0 && plane != INSERT {
+                                // the address of a plane defined earlier: it moves with its target
+                                self.note_alias(plane);
                             }
                         }
                     }
@@ -655,8 +711,12 @@ impl<'a> Replay<'a> {
                         let len = self.rd32(brush + 60);
                         self.bytes(len, 1, 1)?;
                     }
-                    if self.rd32(brush + 64) == INLINE {
+                    let planes = self.rd32(brush + 64);
+                    if planes == INLINE {
                         self.bytes(n, 20, 4)?;
+                    } else if planes != 0 && planes != INSERT {
+                        // the brush's plane array given as the address of planes read before (the sides' own)
+                        self.note_alias(planes);
                     }
                 }
             }
@@ -1725,7 +1785,8 @@ impl<'a> Replay<'a> {
             self.string()?;
         }
         if self.rd32(h + 4) != 0 {
-            let (records, per) = (if self.stock { 15 } else if self.qa() { 19 } else { 16 }, 35usize);
+            // 35 surface types per impact kind (IW4, QA); the 3.19 table has 39 (2964 bytes of effect pointers against QA's 2660)
+            let (records, per) = (if self.stock { 15 } else if self.qa() { 19 } else { 16 }, if self.v319() { 39usize } else { 35usize });
             let effects = self.bytes(records, 4 * per, 4)?;
             for i in 0..per * records as usize {
                 self.asset_reference(self.rd32(effects + 4 * i), Kind::Effect)?;

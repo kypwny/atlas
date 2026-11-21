@@ -211,6 +211,29 @@ fn main() -> Result<()> {
             println!("{n} assets of {zone_name} written to {}", out.display());
             Ok(())
         }
+        Some("--zone2map") => {
+            // atlas --zone2map GAME_FOLDER ZONE.ff OUT.map: the collision brushes, brush entities, static models and entities of a CoDOL map as a Radiant .map
+            let (root, zone_name, out) = (path_arg(&args, 1)?, args.get(2).context("zone file")?, path_arg(&args, 3)?);
+            let key = zone::export::find_key(&root)?;
+            let path = zone::export::zone_files(&root).into_iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(zone_name))).context("no such zone")?;
+            let zone = zone::Zone::open(&path, &key)?;
+            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let m = zone::mapsrc::read(&zone, &stem)?;
+            std::fs::write(&out, zone::mapsrc::to_map(&m))?;
+            println!(
+                "{stem}: {} entities, {} world brushes, {} brush models ({} brushes), {} static models -> {}",
+                m.entities.len(),
+                m.world.len(),
+                m.submodels.len(),
+                m.submodels.iter().map(|s| s.1.len()).sum::<usize>(),
+                m.models.len(),
+                out.display()
+            );
+            for line in &m.report {
+                println!("note: {line}");
+            }
+            Ok(())
+        }
         Some("--buildzone") => {
             // atlas --buildzone GAME_FOLDER UNPACKED_DIR OUT.ff [--signed]: builds the zone again from the files (edited text, deleted assets)
             let (root, dir, out) = (path_arg(&args, 1)?, path_arg(&args, 2)?, path_arg(&args, 3)?);

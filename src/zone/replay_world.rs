@@ -478,22 +478,37 @@ impl<'a> Replay<'a> {
     }
 
     fn qa_clip_info(&mut self, c: usize) -> Res {
+        if self.clip_on && self.apply {
+            let (tag, header) = (self.clip_tag, self.clip_header);
+            self.rec.clips.push(super::replay::ClipRec { tag, header, ..Default::default() });
+        }
         if self.rd32(c + 4) == INLINE {
             let n = self.rd32(c);
-            self.bytes(n, 20, 4)?;
+            let at = self.bytes(n, 20, 4)?;
+            self.clip_note(|k| k.planes = (at, n as usize));
         }
         if self.rd32(c + 12) == INLINE {
             let n = self.rd32(c + 8);
             let records = self.bytes(n, 12, 4)?;
+            self.clip_note(|k| k.materials = (records, n as usize));
             for i in 0..n as usize {
-                if self.rd32(records + 12 * i) == INLINE {
+                let named = self.rd32(records + 12 * i) == INLINE;
+                let name = if named { Some(self.pos) } else { None };
+                if named {
                     self.string()?;
+                }
+                if let Some(at) = name {
+                    let text = self.cstr(at);
+                    self.clip_note(|k| k.material_names.push(text));
+                } else {
+                    self.clip_note(|k| k.material_names.push(None));
                 }
             }
         }
         if self.rd32(c + 20) == INLINE {
             let n = self.rd32(c + 16);
             let records = self.bytes(n, 8, 4)?;
+            self.clip_note(|k| k.sides = (records, n as usize));
             for i in 0..n as usize {
                 let p = self.rd32(records + 8 * i);
                 if p != 0 {
@@ -508,21 +523,28 @@ impl<'a> Replay<'a> {
         if self.rd32(c + 36) == INLINE {
             let n = self.rd32(c + 32);
             let records = self.bytes(n, 20, 4)?;
+            self.clip_note(|k| {
+                k.lb_nodes = (records, n as usize);
+                k.lb_inline = vec![0; n as usize];
+            });
             for i in 0..n as usize {
                 let r = records + 20 * i;
                 let leaves = self.rd16(r + 2) as u16 as i16;
                 if leaves > 0 && self.rd32(r + 8) == INLINE {
-                    self.bytes(leaves as u32, 2, 2)?;
+                    let at = self.bytes(leaves as u32, 2, 2)?;
+                    self.clip_note(|k| k.lb_inline[i] = at);
                 }
             }
         }
         if self.rd32(c + 44) == INLINE {
             let n = self.rd32(c + 40);
-            self.bytes(n, 2, 2)?;
+            let at = self.bytes(n, 2, 2)?;
+            self.clip_note(|k| k.leaf_brushes = (at, n as usize));
         }
         let count = self.rd16(c + 48);
         if self.rd32(c + 52) == INLINE {
             let records = self.bytes(count, 36, 128)?;
+            self.clip_note(|k| k.brushes = (records, count as usize));
             for i in 0..count as usize {
                 let r = records + 36 * i;
                 if self.rd32(r + 4) == INLINE {
@@ -538,12 +560,23 @@ impl<'a> Replay<'a> {
             }
         }
         if self.rd32(c + 56) == INLINE {
-            self.bytes(count, 24, 128)?;
+            let at = self.bytes(count, 24, 128)?;
+            self.clip_note(|k| k.bounds = at);
         }
         if self.rd32(c + 60) == INLINE {
-            self.bytes(count, 4, 4)?;
+            let at = self.bytes(count, 4, 4)?;
+            self.clip_note(|k| k.contents = at);
         }
         Ok(())
+    }
+
+    /// Records into the collision-map record while the first `ClipInfo` is walked.
+    fn clip_note(&mut self, f: impl FnOnce(&mut super::replay::ClipRec)) {
+        if self.clip_on && self.apply {
+            if let Some(k) = self.rec.clips.last_mut() {
+                f(k);
+            }
+        }
     }
 
     fn qa_clip_info_pointer(&mut self, pointer: u32) -> Res {
@@ -717,7 +750,11 @@ impl<'a> Replay<'a> {
         if self.rd32(h) == INLINE {
             self.string()?;
         }
+        self.clip_on = true;
+        self.clip_tag = 0;
+        self.clip_header = h;
         self.qa_clip_info(h + 8)?;
+        self.clip_tag = 1;
         self.qa_clip_info_pointer(self.rd32(h + 72))?;
         if self.rd32(h + 80) != 0 {
             let n = self.rd32(h + 76);
@@ -772,10 +809,15 @@ impl<'a> Replay<'a> {
         if self.rd32(h + 148) != 0 {
             let n = self.rd32(h + 144);
             let records = self.bytes(n, 72, 4)?;
+            if self.apply {
+                self.rec.cmodels = (records, n as usize);
+            }
             for i in 0..n as usize {
+                self.clip_tag = 100 + i as u32;
                 self.qa_clip_info_pointer(self.rd32(records + 72 * i + 28))?;
             }
         }
+        self.clip_on = false;
         if self.rd32(h + 192) != 0 {
             let n = self.rd16(h + 188);
             self.bytes(n, 28, 4)?;
