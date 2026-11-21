@@ -14,7 +14,7 @@ atlas - the Call of Duty asset workbench
 usage:
   atlas [GAME_FOLDER]                     open the browser
   atlas --selftest GAME_FOLDER            decode every image, report problems
-  atlas --map2zone GAME_FOLDER ZONE.ff EDITED.map OUT.ff   writes the edits of a .map made by --zone2map into the zone: entities and static model placement (brush edits and added / deleted models are refused)
+  atlas --map2zone GAME_FOLDER ZONE.ff EDITED.map OUT.ff   writes the edits of a .map made by --zone2map into the zone: entities and static model placement (added / deleted static models are refused; --rebuild-bsp builds the BSP again and drops terrain collision)
   atlas --unzone GAME_FOLDER ZONE.ff OUT_DIR   every asset of a CoDOL zone as a file (map entities and raw files also as text)
   atlas --buildzone GAME_FOLDER DIR OUT.ff [--signed]   builds the zone again from those files: edited text replaces its asset, a deleted file removes it
   atlas --exportdata GAME_FOLDER OUT_DIR  string tables (CSV), localised strings (CSV, JSON) and raw files from every zone
@@ -220,7 +220,8 @@ fn main() -> Result<()> {
             let key = zone::export::find_key(&root)?;
             let path = zone::export::zone_files(&root).into_iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(zone_name))).context("no such zone")?;
             let text = std::fs::read_to_string(&map).with_context(|| format!("reading {}", map.display()))?;
-            let plan = zone::mapwrite::apply(&path, &key, &text, &out)?;
+            let opts = zone::clipwrite::Options { rebuild_bsp: args.iter().any(|a| a == "--rebuild-bsp") };
+            let plan = zone::mapwrite::apply_with(&path, &key, &text, &out, opts)?;
             println!(
                 "{}: {} static models changed ({} with collision), entities {}; written to {}",
                 zone_name,

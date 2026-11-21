@@ -24,6 +24,15 @@ use super::Zone;
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 
+/// What to rewrite besides the brushes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Options {
+    /// Build the BSP (nodes and leaves) again from the brushes. The leaves of the zone's own BSP carry the terrain's collision
+    /// (which aabb trees to test); the new leaves do not, so **terrain collision is dropped**. Meant for maps without terrain
+    /// and for tests.
+    pub rebuild_bsp: bool,
+}
+
 pub struct Rebuild {
     pub blob: Vec<u8>,
     pub rebuilt: Rebuilt,
@@ -102,7 +111,7 @@ fn hull_box(b: &Brush) -> Option<Aabb> {
 
 /// Rewrites the collision brushes of `blob` (the collision asset of `zone`, possibly with static model and entity edits applied)
 /// so that they match `edited`. `None` when the brushes did not change.
-pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource) -> Result<Option<Rebuild>> {
+pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource, opts: Options) -> Result<Option<Rebuild>> {
     // 1. which brushes stay, go and come
     let mut groups: Vec<(Option<u32>, &[Brush], &[Brush])> = vec![(None, &orig.world, &edited.world)];
     let empty: Vec<Brush> = Vec::new();
@@ -120,7 +129,7 @@ pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource) -
         deleted.extend(old.iter().zip(&kept).filter(|(_, k)| !**k).map(|(b, _)| b.id));
         added.extend(add.into_iter().map(|j| (*model, new[j].clone())));
     }
-    if deleted.is_empty() && added.is_empty() {
+    if deleted.is_empty() && added.is_empty() && !opts.rebuild_bsp {
         return Ok(None);
     }
 
@@ -213,7 +222,7 @@ pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource) -
     };
     let world_ids: Vec<u16> = world_members.iter().map(|&i| i as u16).collect();
     let mut leaf_edits: Vec<(usize, usize, u32)> = Vec::new(); // (leaf, root, contents)
-    for i in 0..leaf_n {
+    for i in 0..if opts.rebuild_bsp { 0 } else { leaf_n } {
         let o = rel(leaf0) + 40 * i;
         let (mid, half): ([f32; 3], [f32; 3]) = (std::array::from_fn(|k| rdf(blob, o + 12 + 4 * k)), std::array::from_fn(|k| rdf(blob, o + 24 + 4 * k)));
         let leaf = Aabb { lo: std::array::from_fn(|k| mid[k] - half[k] - 0.01), hi: std::array::from_fn(|k| mid[k] + half[k] + 0.01) };
@@ -311,6 +320,73 @@ pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource) -
     }
     let new_plane_allocs = 0usize;
 
+    // the BSP: nodes and leaves from the brushes in play
+    let (nodes0, leafs0) = (r.rec.clip_nodes, r.rec.clip_leafs);
+    let nodes_end_old = nodes0.0 + 8 * nodes0.1;
+    let leafs_end_old = leafs0.0 + 40 * leafs0.1;
+    let mut bsp_bytes: Vec<u8> = Vec::new();
+    let mut bsp_nodes_len = 0usize;
+    let mut bsp_counts = (0usize, 0usize);
+    if opts.rebuild_bsp {
+        if nodes_end_old != leafs0.0 || nodes0.0 < r1 {
+            bail!("the BSP nodes and leaves of this collision map are not laid out as expected (inline node planes?)");
+        }
+        let old_planes: Vec<([f32; 3], f32)> = match r.rec.world.as_ref() {
+            Some(w) => (0..w.planes.1)
+                .map(|k| {
+                    let o = w.planes.0 + 20 * k;
+                    ([rdf(&zone.data, o), rdf(&zone.data, o + 4), rdf(&zone.data, o + 8)], rdf(&zone.data, o + 12))
+                })
+                .collect(),
+            None => bail!("the zone has no world planes"),
+        };
+        let world_boxes: Vec<u16> = world_ids.clone();
+        let bsp = super::colltree::Bsp::build(&boxes, &world_boxes, 16);
+        // every node's plane is an axial one: look it up in the shared array, or append it
+        let mut node_words: Vec<(usize, u32)> = Vec::new();
+        let mut node_records: Vec<u8> = Vec::new();
+        for (i, n) in bsp.nodes.iter().enumerate() {
+            let axis = (0..3).find(|&k| n.normal[k] == 1.0).unwrap_or(0);
+            let want = ({ let mut v = [0.0f32; 3]; v[axis] = 1.0; v }, n.dist);
+            let idx = match old_planes.iter().position(|p| *p == want) {
+                Some(k) => k,
+                None => {
+                    let plane = [want.0[0], want.0[1], want.0[2], want.1];
+                    plane_count0 + added_planes.iter().position(|p| *p == plane).unwrap_or_else(|| {
+                        added_planes.push(plane);
+                        added_planes.len() - 1
+                    })
+                }
+            };
+            node_words.push((8 * i, plane_base + 20 * idx as u32));
+            node_records.extend_from_slice(&plane_base.to_le_bytes());
+            for ch in n.children {
+                node_records.extend_from_slice(&(ch as i16).to_le_bytes());
+            }
+        }
+        let mut leaf_records: Vec<u8> = Vec::new();
+        for l in &bsp.leaves {
+            let (root, all) = tree_for(l.members.clone(), &mut nodes);
+            leaf_records.extend_from_slice(&0u16.to_le_bytes());
+            leaf_records.extend_from_slice(&0u16.to_le_bytes());
+            leaf_records.extend_from_slice(&all.to_le_bytes());
+            leaf_records.extend_from_slice(&0u32.to_le_bytes());
+            let mid: [f32; 3] = std::array::from_fn(|k| (l.bounds.lo[k] + l.bounds.hi[k]) * 0.5);
+            let half: [f32; 3] = std::array::from_fn(|k| (l.bounds.hi[k] - l.bounds.lo[k]) * 0.5);
+            for v in mid.iter().chain(half.iter()) {
+                leaf_records.extend_from_slice(&v.to_le_bytes());
+            }
+            leaf_records.extend_from_slice(&(root as u32).to_le_bytes());
+        }
+        bsp_nodes_len = node_records.len();
+        bsp_counts = (bsp.nodes.len(), bsp.leaves.len());
+        bsp_bytes.extend_from_slice(&node_records);
+        bsp_bytes.extend_from_slice(&leaf_records);
+        for (off, value) in node_words {
+            fixed.push((usize::MAX - off, value)); // placed once the node array's final offset is known
+        }
+    }
+
     // nodes and their inline brush lists
     let (mut node_bytes, mut list_bytes, mut lists) = (Vec::with_capacity(nodes.len() * 20), Vec::new(), 0usize);
     for n in &nodes {
@@ -371,13 +447,31 @@ pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource) -
     let _ = (planes_at, edges_at, nodes_at, brushes_at, bounds_at);
 
     // 7. the new blob: head, region, tail
-    let (head, tail) = (&blob[..rel(r0)], &blob[rel(r1)..]);
-    let mut out = Vec::with_capacity(head.len() + region.len() + tail.len());
+    let head = &blob[..rel(r0)];
+    let mut out = Vec::with_capacity(head.len() + region.len() + (blob.len() - rel(r1)) + bsp_bytes.len());
     out.extend_from_slice(head);
     out.extend_from_slice(&region);
-    out.extend_from_slice(tail);
     let delta = region.len() as i64 - (r1 - r0) as i64;
-    let shifted = |o: usize| -> usize { (rel(o) as i64 + delta) as usize };
+    let delta2 = if opts.rebuild_bsp { bsp_bytes.len() as i64 - (leafs_end_old - nodes0.0) as i64 } else { 0 };
+    if opts.rebuild_bsp {
+        out.extend_from_slice(&blob[rel(r1)..rel(nodes0.0)]);
+        out.extend_from_slice(&bsp_bytes);
+        out.extend_from_slice(&blob[rel(leafs_end_old)..]);
+    } else {
+        out.extend_from_slice(&blob[rel(r1)..]);
+    }
+    // where an old stream offset ended up (the nodes and leaves are replaced as one piece, nothing is asked about their inside)
+    let shifted = |o: usize| -> usize { (rel(o) as i64 + delta + if opts.rebuild_bsp && o >= leafs_end_old { delta2 } else { 0 }) as usize };
+    if opts.rebuild_bsp {
+        // the nodes' plane words: literal addresses (they were queued with their offsets inside the node array)
+        let nodes_at = rel(nodes0.0) + delta as usize;
+        for f in fixed.iter_mut().filter(|f| f.0 > usize::MAX / 2) {
+            f.0 = nodes_at + (usize::MAX - f.0);
+        }
+        put32(&mut out, rel(c.header) + 84, bsp_counts.0 as u32);
+        put32(&mut out, rel(c.header) + 92, bsp_counts.1 as u32);
+        let _ = bsp_nodes_len;
+    }
 
     // the clipMap header's ClipInfo, and the second one's header (a mirror of it)
     let plane_total = (plane_count0 + added_planes.len()) as u32;
@@ -396,7 +490,7 @@ pub fn rebuild(zone: &Zone, blob: &[u8], orig: &MapSource, edited: &MapSource) -
         fix_info(&mut out, shifted(r.rec.clip_pinfo));
     }
     // the BSP leaves: tree root and contents
-    for (i, root, all) in leaf_edits.iter().filter(|_| !keep_trees) {
+    for (i, root, all) in leaf_edits.iter().filter(|_| !keep_trees && !opts.rebuild_bsp) {
         let o = shifted(leaf0) + 40 * i;
         put32(&mut out, o + 4, *all);
         put32(&mut out, o + 36, *root as u32);

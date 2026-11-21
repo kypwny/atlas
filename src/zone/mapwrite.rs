@@ -116,7 +116,12 @@ fn asset_containing(zone: &Zone, offset: usize) -> Result<usize> {
 
 /// What has to change in the zone to turn it into `edited`. `orig` is [`mapsrc::read`] of the same zone.
 pub fn plan(zone: &Zone, orig: &MapSource, edited: &MapSource) -> Result<Plan> {
-    let brush_edit = match brush_differences(orig, edited) {
+    plan_with(zone, orig, edited, super::clipwrite::Options::default())
+}
+
+/// [`plan`] with options for the collision rewrite.
+pub fn plan_with(zone: &Zone, orig: &MapSource, edited: &MapSource, opts: super::clipwrite::Options) -> Result<Plan> {
+    let brush_edit = opts.rebuild_bsp || match brush_differences(orig, edited) {
         Ok(d) => !d.is_empty(),
         // a different number of brushes is an edit the rewrite handles; a changed set of brush models is not
         Err(e) if e.to_string().contains("brush models of the map differ") => return Err(e),
@@ -242,7 +247,7 @@ pub fn plan(zone: &Zone, orig: &MapSource, edited: &MapSource) -> Result<Plan> {
         plan.entities_changed = true;
     }
     if brush_edit {
-        match super::clipwrite::rebuild(zone, &plan.clip_blob, orig, edited)? {
+        match super::clipwrite::rebuild(zone, &plan.clip_blob, orig, edited, opts)? {
             Some(rb) => {
                 plan.clip_blob = rb.blob;
                 plan.rebuilt = Some(rb.rebuilt);
@@ -289,12 +294,17 @@ pub fn plan(zone: &Zone, orig: &MapSource, edited: &MapSource) -> Result<Plan> {
 
 /// Reads `map_text`, compares it with the zone at `zone_path` and writes the changed zone to `out` (unsigned).
 pub fn apply(zone_path: &std::path::Path, key: &super::fastfile::ArchiveKey, map_text: &str, out: &std::path::Path) -> Result<Plan> {
+    apply_with(zone_path, key, map_text, out, super::clipwrite::Options::default())
+}
+
+/// [`apply`] with options for the collision rewrite.
+pub fn apply_with(zone_path: &std::path::Path, key: &super::fastfile::ArchiveKey, map_text: &str, out: &std::path::Path, opts: super::clipwrite::Options) -> Result<Plan> {
     let opened = super::fastfile::open(zone_path, key)?;
     let zone = Zone::from_image(opened.version, opened.image.clone())?;
     let name = zone_path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let orig = mapsrc::read(&zone, &name)?;
     let edited = mapsrc::parse_map(map_text)?;
-    let plan = plan(&zone, &orig, &edited)?;
+    let plan = plan_with(&zone, &orig, &edited, opts)?;
     let mut builder = super::writer::ZoneBuilder::from_zone(&zone);
     if plan.models_changed > 0 || plan.world_changed {
         builder.replace_same_layout(plan.world_asset, plan.world_blob.clone());

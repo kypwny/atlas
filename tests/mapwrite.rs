@@ -255,3 +255,50 @@ fn brushes_can_be_deleted_added_and_changed() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// The BSP built again: the zone reads back, and every brush is listed by the tree of each leaf its box overlaps.
+#[test]
+fn a_rebuilt_bsp_reaches_every_brush() {
+    let Some(root) = std::env::var_os("CODOL_TEST_319").map(PathBuf::from) else { return };
+    let key = export::find_key(&root).unwrap();
+    let name = "mp_dr_cistern.ff";
+    let path = find(&root, name);
+    let zone = Zone::open(&path, &key).unwrap();
+    let orig = mapsrc::read(&zone, name).unwrap();
+    let map = mapsrc::to_map(&orig);
+    let out = std::env::temp_dir().join(format!("atlas_bsp_{}.ff", std::process::id()));
+    let opts = atlas::zone::clipwrite::Options { rebuild_bsp: true };
+    let plan = mapwrite::apply_with(&path, &key, &map, &out, opts).unwrap();
+    assert!(plan.rebuilt.is_some());
+    let after = Zone::open(&out, &key).unwrap();
+    let t = atlas::zone::colltree::read(&after).unwrap();
+    let before = atlas::zone::colltree::read(&zone).unwrap();
+    assert!(t.bsp.leaves.len() != before.bsp.leaves.len(), "the BSP was not replaced");
+    let mut listed: Vec<std::collections::HashSet<u16>> = Vec::new();
+    for &r in &t.leaf_root_of {
+        let mut v = Vec::new();
+        if r != 0 {
+            t.tree_brushes(r, &mut v);
+        }
+        listed.push(v.into_iter().collect());
+    }
+    for &b in &t.roots[0].1 {
+        let bx = t.boxes[b as usize];
+        for l in t.bsp.leaves_in(&bx) {
+            assert!(listed[l].contains(&b), "brush {b} overlaps leaf {l}, whose tree does not list it");
+        }
+    }
+    // the tree of every leaf finds what it lists
+    for (l, &r) in t.leaf_root_of.iter().enumerate() {
+        if r != 0 {
+            for &b in &listed[l] {
+                assert!(t.tree.query(r, &t.boxes[b as usize]).contains(&b), "leaf {l}: brush {b} listed but not found");
+            }
+        }
+    }
+    // everything but the BSP and brushes is as it was
+    let a = mapsrc::read(&after, name).unwrap();
+    assert_eq!(a.models.len(), orig.models.len());
+    assert_eq!(a.entities.len(), orig.entities.len());
+    let _ = std::fs::remove_file(out);
+}

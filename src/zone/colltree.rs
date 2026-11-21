@@ -186,6 +186,9 @@ pub struct ZoneTree {
     pub roots: Vec<(usize, Vec<u16>)>,
     /// The distinct roots of the leaves' trees (the leaf-brush node each BSP leaf points at; 0 means none).
     pub leaf_roots: Vec<usize>,
+    /// The zone's BSP (leaf bounds filled, no member lists) and the tree root of each of its leaves.
+    pub bsp: Bsp,
+    pub leaf_root_of: Vec<usize>,
 }
 
 impl ZoneTree {
@@ -300,7 +303,23 @@ pub fn read(zone: &Zone) -> Result<ZoneTree> {
     let mut leaf_roots: Vec<usize> = (0..nl).map(|i| u32_at(d, l0 + 40 * i + 36) as usize).filter(|&n| n != 0).collect();
     leaf_roots.sort_unstable();
     leaf_roots.dedup();
-    Ok(ZoneTree { boxes, contents, tree, roots, leaf_roots })
+    let mut bsp = Bsp::default();
+    let mut leaf_root_of = Vec::with_capacity(nl);
+    for i in 0..nl {
+        let o = l0 + 40 * i;
+        let (mid, half): ([f32; 3], [f32; 3]) = (std::array::from_fn(|k| f32_at(d, o + 12 + 4 * k)), std::array::from_fn(|k| f32_at(d, o + 24 + 4 * k)));
+        bsp.leaves.push(BspLeaf { bounds: Aabb { lo: std::array::from_fn(|k| mid[k] - half[k]), hi: std::array::from_fn(|k| mid[k] + half[k]) }, members: Vec::new() });
+        leaf_root_of.push(u32_at(d, o + 36) as usize);
+    }
+    let (n0, nnodes) = r.rec.clip_nodes;
+    for i in 0..nnodes {
+        let o = n0 + 8 * i;
+        let plane = u32_at(d, o);
+        let Some(po) = resolver.offset(plane) else { bail!("BSP node {i}: its plane pointer leads nowhere") };
+        let child = |k: usize| u16_at(d, o + 4 + 2 * k) as i16 as i32;
+        bsp.nodes.push(BspNode { normal: [f32_at(d, po), f32_at(d, po + 4), f32_at(d, po + 8)], dist: f32_at(d, po + 12), children: [child(0), child(1)] });
+    }
+    Ok(ZoneTree { boxes, contents, tree, roots, leaf_roots, bsp, leaf_root_of })
 }
 
 #[cfg(test)]
@@ -372,5 +391,201 @@ mod tests {
                 assert!(i + (n.child[0] as usize) < t.nodes.len() && i + (n.child[1] as usize) < t.nodes.len());
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------
+// The BSP that leads to the trees: cNode_t (a plane and two children) and cLeaf_t (bounds and a tree root).
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BspNode {
+    pub normal: [f32; 3],
+    pub dist: f32,
+    /// >= 0: a node; < 0: leaf number `-1 - child`. `children[0]` is the side where `normal . p - dist >= 0`.
+    pub children: [i32; 2],
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BspLeaf {
+    pub bounds: Aabb,
+    /// The brushes whose boxes touch the leaf's cell (builder output; empty for a BSP read from a zone).
+    pub members: Vec<u16>,
+}
+
+impl Default for Aabb {
+    fn default() -> Self {
+        Aabb { lo: [0.0; 3], hi: [0.0; 3] }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Bsp {
+    pub nodes: Vec<BspNode>,
+    pub leaves: Vec<BspLeaf>,
+}
+
+impl Bsp {
+    /// The leaf a point is in (`CM_PointLeafnum`).
+    pub fn leaf_of(&self, p: [f32; 3]) -> usize {
+        if self.nodes.is_empty() {
+            return 0;
+        }
+        let mut n = 0i32;
+        let mut guard = 0;
+        while n >= 0 && guard < 100_000 {
+            let node = &self.nodes[n as usize];
+            let d = node.normal[0] * p[0] + node.normal[1] * p[1] + node.normal[2] * p[2] - node.dist;
+            n = node.children[(d < 0.0) as usize];
+            guard += 1;
+        }
+        (-1 - n).max(0) as usize
+    }
+
+    /// The leaves a box overlaps (`CM_BoxLeafnums`).
+    pub fn leaves_in(&self, q: &Aabb) -> Vec<usize> {
+        let mut out = Vec::new();
+        if self.nodes.is_empty() {
+            return vec![0];
+        }
+        let mut stack = vec![0i32];
+        while let Some(mut n) = stack.pop() {
+            while n >= 0 {
+                let node = &self.nodes[n as usize];
+                // the extreme corners of the box along the normal
+                let (mut lo, mut hi) = (0.0f32, 0.0f32);
+                for k in 0..3 {
+                    let (a, b) = (node.normal[k] * q.lo[k], node.normal[k] * q.hi[k]);
+                    lo += a.min(b);
+                    hi += a.max(b);
+                }
+                if lo - node.dist >= 0.0 {
+                    n = node.children[0];
+                } else if hi - node.dist < 0.0 {
+                    n = node.children[1];
+                } else {
+                    stack.push(node.children[1]);
+                    n = node.children[0];
+                }
+            }
+            out.push((-1 - n) as usize);
+        }
+        out
+    }
+
+    /// Builds a BSP of axis-aligned planes over the brushes `members`: a cell is split at the median brush centre along its
+    /// longest side until at most `leaf_brushes` boxes touch it (or a split separates nothing). Leaves keep the cell's bounds
+    /// (the cells together tile the padded box around all brushes) and the brushes whose boxes touch the cell.
+    pub fn build(boxes: &[Aabb], members: &[u16], leaf_brushes: usize) -> Bsp {
+        let mut bsp = Bsp::default();
+        let mut all = Aabb { lo: [f32::MAX; 3], hi: [f32::MIN; 3] };
+        for &m in members {
+            let b = boxes[m as usize];
+            for k in 0..3 {
+                all.lo[k] = all.lo[k].min(b.lo[k]);
+                all.hi[k] = all.hi[k].max(b.hi[k]);
+            }
+        }
+        if members.is_empty() {
+            bsp.leaves.push(BspLeaf::default());
+            return bsp;
+        }
+        for k in 0..3 {
+            all.lo[k] -= 32.0;
+            all.hi[k] += 32.0;
+        }
+        // child links are 16 bits (a node number, or -1 - leaf): a bigger map gets bigger leaves until it fits
+        let mut cap = leaf_brushes.max(1);
+        loop {
+            bsp = Bsp::default();
+            bsp.split(boxes, members.to_vec(), all, cap, 0);
+            if (bsp.nodes.len() <= 32000 && bsp.leaves.len() <= 32000) || cap > members.len() {
+                return bsp;
+            }
+            cap *= 2;
+        }
+    }
+
+    /// Adds the cell and returns its child reference (>= 0 node, < 0 leaf).
+    fn split(&mut self, boxes: &[Aabb], set: Vec<u16>, cell: Aabb, cap: usize, depth: usize) -> i32 {
+        let leaf = |bsp: &mut Bsp, set: Vec<u16>, cell: Aabb| -> i32 {
+            bsp.leaves.push(BspLeaf { bounds: cell, members: set });
+            -(bsp.leaves.len() as i32)
+        };
+        if set.len() <= cap || depth > 40 {
+            return leaf(self, set, cell);
+        }
+        // axes by the extent of the cell, longest first
+        let mut axes = [0usize, 1, 2];
+        axes.sort_by(|&a, &b| (cell.hi[b] - cell.lo[b]).total_cmp(&(cell.hi[a] - cell.lo[a])));
+        for &a in &axes {
+            if cell.hi[a] - cell.lo[a] < 1.0 {
+                continue;
+            }
+            let mut c: Vec<f32> = set.iter().map(|&b| (boxes[b as usize].lo[a] + boxes[b as usize].hi[a]) * 0.5).collect();
+            c.sort_by(|x, y| x.total_cmp(y));
+            let dist = c[c.len() / 2].clamp(cell.lo[a] + 0.5, cell.hi[a] - 0.5);
+            let front: Vec<u16> = set.iter().copied().filter(|&b| boxes[b as usize].hi[a] >= dist).collect();
+            let back: Vec<u16> = set.iter().copied().filter(|&b| boxes[b as usize].lo[a] <= dist).collect();
+            // a split that leaves everything on one side separates nothing
+            if front.len() == set.len() || back.len() == set.len() {
+                continue;
+            }
+            let at = self.nodes.len();
+            let mut normal = [0.0f32; 3];
+            normal[a] = 1.0;
+            self.nodes.push(BspNode { normal, dist, children: [0, 0] });
+            let (mut fc, mut bc) = (cell, cell);
+            fc.lo[a] = dist;
+            bc.hi[a] = dist;
+            let f = self.split(boxes, front, fc, cap, depth + 1);
+            let b = self.split(boxes, back, bc, cap, depth + 1);
+            self.nodes[at].children = [f, b];
+            return at as i32;
+        }
+        leaf(self, set, cell)
+    }
+}
+
+#[cfg(test)]
+mod bsp_tests {
+    use super::*;
+
+    fn grid(n: usize) -> Vec<Aabb> {
+        (0..n)
+            .map(|i| {
+                let (x, y) = ((i % 30) as f32 * 50.0, (i / 30) as f32 * 50.0);
+                Aabb { lo: [x, y, 0.0], hi: [x + 30.0, y + 30.0, 40.0] }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_point_of_a_brush_lands_in_a_leaf_that_lists_it() {
+        let b = grid(1200);
+        let all: Vec<u16> = (0..b.len() as u16).collect();
+        let bsp = Bsp::build(&b, &all, 8);
+        assert!(bsp.leaves.len() > 50 && bsp.nodes.len() + 1 == bsp.leaves.len(), "{} leaves, {} nodes", bsp.leaves.len(), bsp.nodes.len());
+        for &m in &all {
+            let bx = b[m as usize];
+            for p in [bx.lo, bx.hi, [(bx.lo[0] + bx.hi[0]) * 0.5, (bx.lo[1] + bx.hi[1]) * 0.5, (bx.lo[2] + bx.hi[2]) * 0.5]] {
+                let leaf = bsp.leaf_of(p);
+                assert!(bsp.leaves[leaf].members.contains(&m), "brush {m} at {p:?} is not listed by leaf {leaf}");
+            }
+            assert!(bsp.leaves_in(&bx).iter().any(|&l| bsp.leaves[l].members.contains(&m)));
+        }
+    }
+
+    #[test]
+    fn leaves_tile_the_cells_and_stay_small() {
+        let b = grid(1200);
+        let all: Vec<u16> = (0..b.len() as u16).collect();
+        let bsp = Bsp::build(&b, &all, 8);
+        let biggest = bsp.leaves.iter().map(|l| l.members.len()).max().unwrap();
+        assert!(biggest <= 24, "a leaf holds {biggest} brushes");
+        // points far outside still land in a leaf
+        assert!(bsp.leaf_of([1e7, -1e7, 5.0]) < bsp.leaves.len());
+        // an empty set is one empty leaf
+        let empty = Bsp::build(&b, &[], 8);
+        assert_eq!((empty.nodes.len(), empty.leaves.len()), (0, 1));
     }
 }
