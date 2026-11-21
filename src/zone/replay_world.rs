@@ -12,6 +12,15 @@ impl<'a> Replay<'a> {
         if self.iw4_sizes() { 0 } else { LATE }
     }
 
+    /// Remembers an array of surface numbers (see `WorldRec::lists`).
+    fn note_list(&mut self, kind: u8, at: usize, n: usize) {
+        if self.apply {
+            if let Some(w) = self.rec.world.as_mut() {
+                w.lists.push((kind, at, n));
+            }
+        }
+    }
+
     /// Runtime-only arrays live in zero-filled block 2 and consume no stream bytes.
     fn world_zero(&mut self, reference: u32, count: u64, stride: usize, alignment: usize) -> Res {
         self.push(2)?;
@@ -47,7 +56,8 @@ impl<'a> Replay<'a> {
                 let sky = skies + i * 16;
                 if self.rd32(sky + 4) != 0 {
                     let n = self.rd32(sky);
-                    self.bytes(n, 4, 4)?;
+                    let at = self.bytes(n, 4, 4)?;
+                    self.note_list(0, at, n as usize);
                 }
                 self.asset_reference(self.rd32(sky + 8), Kind::Image)?;
             }
@@ -88,6 +98,11 @@ impl<'a> Replay<'a> {
                         return Err(self.fail("tree node count"));
                     }
                     let nodes = self.bytes(n, 44, 4)?;
+                    if self.apply {
+                        if let Some(w) = self.rec.world.as_mut() {
+                            w.cell_nodes.push((nodes, n as usize));
+                        }
+                    }
                     for j in 0..n as usize {
                         let node = nodes + j * 44;
                         if self.ptr(node + 36) == INLINE {
@@ -158,7 +173,8 @@ impl<'a> Replay<'a> {
                 for j in 0..n as usize {
                     if self.rd32(lists + j * 8) != 0 {
                         let m = self.rd32(lists + j * 8 + 4);
-                        self.bytes(m, 2, 2)?;
+                        let at = self.bytes(m, 2, 2)?;
+                        self.note_list(2 + (j as u8).min(1), at, m as usize);
                     }
                 }
             }
@@ -260,7 +276,12 @@ impl<'a> Replay<'a> {
         let suns = if self.iw4_sizes() { 2 } else { 4 };
         if self.rd32(early + 212) != 0 {
             let n = self.rd32(early + 208);
-            self.bytes(n, 60, 4)?;
+            let at = self.bytes(n, 60, 4)?;
+            if self.apply {
+                if let Some(w) = self.rec.world.as_mut() {
+                    w.brush_models = (at, n as usize);
+                }
+            }
         }
         if self.rd32(early + 248) != 0 {
             let n = self.rd32(early + 244);
@@ -317,7 +338,8 @@ impl<'a> Replay<'a> {
                 let r = records + i * 12;
                 if self.rd32(r + 4) != 0 {
                     let n = self.rd16(r);
-                    self.bytes(n, 2, 2)?;
+                    let at = self.bytes(n, 2, 2)?;
+                    self.note_list(1, at, n as usize);
                 }
                 if self.rd32(r + 8) != 0 {
                     let n = self.rd16(r + 2);
@@ -362,7 +384,12 @@ impl<'a> Replay<'a> {
             self.world_zero(self.rd32(p + 52 + 4 * i), count, 1, 1)?;
         }
         if self.rd32(p + 76) != 0 {
-            self.bytes(sorted as u32, 2, 2)?;
+            let at = self.bytes(sorted as u32, 2, 2)?;
+            if self.apply {
+                if let Some(w) = self.rec.world.as_mut() {
+                    w.sorted = (at, sorted as usize);
+                }
+            }
         }
         if self.rd32(p + 80) != 0 {
             let at = self.bytes(models, 36, 4)?;
@@ -393,7 +420,12 @@ impl<'a> Replay<'a> {
             }
         }
         if self.rd32(p + 88) != 0 {
-            self.bytes(surfaces, 24, 4)?;
+            let at = self.bytes(surfaces, 24, 4)?;
+            if self.apply {
+                if let Some(w) = self.rec.world.as_mut() {
+                    w.surface_bounds = at;
+                }
+            }
         }
         if self.rd32(p + 92) != 0 {
             let slots = 0x3000_0001 + align4(self.positions()[3]) as u32;

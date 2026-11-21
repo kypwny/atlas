@@ -32,6 +32,16 @@ pub struct Options {
     /// come after it), so every old child link moves up by the number of copies. A leaf names its trees by a 16-bit first index
     /// and count: the leaves grow until the copies fit.
     pub rebuild_bsp: bool,
+    /// Also draw the brushes that are new to the zone (and the moved ones, which are new brushes too): their faces become
+    /// render surfaces of the GfxWorld ([`worldwrite`](super::worldwrite)). Needs the material of a face to be one the map's lit
+    /// opaque surfaces use. The old geometry of a moved or deleted brush stays drawn.
+    pub render_new_brushes: bool,
+}
+
+/// The world brushes of `edited` that are not in `orig`: what [`rebuild`] adds.
+pub fn added_world_brushes(orig: &MapSource, edited: &MapSource) -> Vec<Brush> {
+    let (_, add) = align(&orig.world, &edited.world);
+    add.into_iter().map(|j| edited.world[j].clone()).collect()
 }
 
 pub struct Rebuild {

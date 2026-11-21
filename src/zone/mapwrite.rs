@@ -246,6 +246,29 @@ pub fn plan_with(zone: &Zone, orig: &MapSource, edited: &MapSource, opts: super:
         plan.clip_blob = crate::zonefiles::with_nested_text(&plan.clip_blob, (hdr - clip_start, at - clip_start, n), &entity_text(&edited.entities));
         plan.entities_changed = true;
     }
+    if brush_edit && opts.render_new_brushes {
+        // the faces of the new brushes as render surfaces; this edits the world asset before the planes are appended to it
+        // (the planes lie in front of everything the surface writer touches)
+        let mut faces: Vec<super::worldwrite::NewFace> = Vec::new();
+        for b in super::clipwrite::added_world_brushes(orig, edited) {
+            for (si, n, corners) in super::mapscene::brush_faces(&b) {
+                faces.push(super::worldwrite::NewFace { corners, normal: n, material: b.sides[si].material.clone() });
+            }
+        }
+        if !faces.is_empty() {
+            if plan.world_blob.is_empty() {
+                plan.world_asset = asset_containing(zone, lay.world_header)?;
+                let a = &zone.assets[plan.world_asset];
+                plan.world_blob = zone.data[a.start..a.start + a.extent].to_vec();
+            }
+            let added = super::worldwrite::add_surfaces(zone, &mut plan.world_blob, plan.world_asset, &faces)?;
+            plan.world_changed = true;
+            plan.notes.push(format!("render world: {} surfaces ({} vertices, {} triangles) added", added.surfaces, added.vertices, added.triangles));
+            for s in added.skipped.iter().collect::<std::collections::BTreeSet<_>>() {
+                plan.notes.push(format!("render world: skipped a face: {s}"));
+            }
+        }
+    }
     if brush_edit {
         match super::clipwrite::rebuild(zone, &plan.clip_blob, orig, edited, opts)? {
             Some(rb) => {

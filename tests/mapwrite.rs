@@ -267,7 +267,7 @@ fn a_rebuilt_bsp_reaches_every_brush() {
     let orig = mapsrc::read(&zone, name).unwrap();
     let map = mapsrc::to_map(&orig);
     let out = std::env::temp_dir().join(format!("atlas_bsp_{}.ff", std::process::id()));
-    let opts = atlas::zone::clipwrite::Options { rebuild_bsp: true };
+    let opts = atlas::zone::clipwrite::Options { rebuild_bsp: true, ..Default::default() };
     let plan = mapwrite::apply_with(&path, &key, &map, &out, opts).unwrap();
     assert!(plan.rebuilt.is_some());
     let after = Zone::open(&out, &key).unwrap();
@@ -326,4 +326,58 @@ fn a_rebuilt_bsp_reaches_every_brush() {
     assert_eq!(a.models.len(), orig.models.len());
     assert_eq!(a.entities.len(), orig.entities.len());
     let _ = std::fs::remove_file(out);
+}
+
+/// A new brush gets render surfaces: the world stays sound by the invariants of the shipped maps, and the viewer's reader finds
+/// the cube's faces (six quads: 24 vertices, 12 triangles).
+#[test]
+fn a_new_brush_is_drawn() {
+    let Some(root) = std::env::var_os("CODOL_TEST_319").map(PathBuf::from) else { return };
+    let key = export::find_key(&root).unwrap();
+    for name in ["mp_dr_cistern.ff", "mp_nuked.ff"] {
+        let path = find(&root, name);
+        let zone = Zone::open(&path, &key).unwrap();
+        assert!(atlas::zone::worldwrite::check(&zone).unwrap().is_empty(), "{name}: the shipped zone fails the check");
+        let orig = mapsrc::read(&zone, name).unwrap();
+        let (before, materials, _, _) = atlas::zone::world::map_of_zone(&zone).unwrap();
+        let map = mapsrc::to_map(&orig);
+        let mut done = false;
+        for material in materials.iter().take(40) {
+            let side = |n: [f64; 3], d: f64| mapsrc::Side { normal: n, dist: d, material: material.clone() };
+            let cube_brush = mapsrc::Brush {
+                sides: vec![side([-1.0, 0.0, 0.0], 0.0), side([1.0, 0.0, 0.0], 64.0), side([0.0, -1.0, 0.0], 0.0), side([0.0, 1.0, 0.0], 64.0), side([0.0, 0.0, -1.0], 0.0), side([0.0, 0.0, 1.0], 64.0)],
+                contents: 1,
+                id: mapsrc::NO_ID,
+            };
+            let cube_map = mapsrc::to_map(&mapsrc::MapSource { entities: vec![mapsrc::Entity { keys: vec![("classname".into(), "worldspawn".into())] }], world: vec![cube_brush], ..Default::default() });
+            let cube_start = cube_map.find("// brush 0").unwrap();
+            let cube = format!("{}\n", cube_map[cube_start..].trim_end().trim_end_matches('}').trim_end()).replace("// brush 0", "// brush new");
+            let mut edited = map.clone();
+            let world_end = edited.find("\n}\n// entity 1\n").unwrap() + 1;
+            edited.insert_str(world_end, &cube);
+            let out = std::env::temp_dir().join(format!("atlas_render_{}_{}.ff", name, std::process::id()));
+            let opts = atlas::zone::clipwrite::Options { render_new_brushes: true, ..Default::default() };
+            let plan = mapwrite::apply_with(&path, &key, &edited, &out, opts).unwrap();
+            if !plan.notes.iter().any(|n| n.contains("render world: 6 surfaces")) {
+                let _ = std::fs::remove_file(&out);
+                continue;
+            }
+            println!("{name}: material {material}: {:?}", plan.notes);
+            let after = Zone::open(&out, &key).unwrap();
+            let bad = atlas::zone::worldwrite::check(&after).unwrap();
+            assert!(bad.is_empty(), "{name}: {:?}", &bad[..bad.len().min(8)]);
+            let (m1, _, _, _) = atlas::zone::world::map_of_zone(&after).unwrap();
+            let (v0, t0) = (before.vertex_count(), before.triangle_count());
+            let (v1, t1) = (m1.vertex_count(), m1.triangle_count());
+            println!("{name}: vertices {v0} -> {v1}, triangles {t0} -> {t1}");
+            assert_eq!((v1 - v0, t1 - t0), (24, 12), "{name}");
+            // the cube's corners are among the vertices
+            let has = |p: [f32; 3]| m1.surfaces.iter().flat_map(|s| s.vertices.iter()).any(|v| (0..3).all(|k| (v.pos[k] - p[k]).abs() < 0.01));
+            assert!(has([0.0, 0.0, 0.0]) && has([64.0, 64.0, 64.0]) && has([64.0, 0.0, 64.0]), "{name}: cube corners missing");
+            let _ = std::fs::remove_file(&out);
+            done = true;
+            break;
+        }
+        assert!(done, "{name}: no material of the map could be used");
+    }
 }

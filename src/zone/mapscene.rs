@@ -57,6 +57,11 @@ impl Mesh {
 /// The corners of the solid a brush's planes enclose, then one polygon per plane with at least three of them. Planes are
 /// `normal . x <= dist`, normals pointing out. A brush whose planes enclose nothing gives no polygons.
 pub fn brush_polygons(b: &Brush) -> Vec<(V3, Vec<V3>)> {
+    brush_faces(b).into_iter().map(|(_, n, v)| (n, v)).collect()
+}
+
+/// [`brush_polygons`] with the index of the side each polygon lies on.
+pub fn brush_faces(b: &Brush) -> Vec<(usize, V3, Vec<V3>)> {
     let p = &b.sides;
     let mut corners: Vec<V3> = Vec::new();
     for i in 0..p.len() {
@@ -76,7 +81,7 @@ pub fn brush_polygons(b: &Brush) -> Vec<(V3, Vec<V3>)> {
         }
     }
     let mut out = Vec::new();
-    for s in p {
+    for (si, s) in p.iter().enumerate() {
         let on: Vec<V3> = corners.iter().copied().filter(|c| (dot(s.normal, *c) - s.dist).abs() < 0.05).collect();
         if on.len() < 3 {
             continue;
@@ -91,7 +96,7 @@ pub fn brush_polygons(b: &Brush) -> Vec<(V3, Vec<V3>)> {
             let (da, db) = (sub(*a, centre), sub(*b, centre));
             dot(da, v).atan2(dot(da, u)).total_cmp(&dot(db, v).atan2(dot(db, u)))
         });
-        out.push((n, sorted));
+        out.push((si, n, sorted));
     }
     out
 }

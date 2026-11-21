@@ -14,7 +14,7 @@ atlas - the Call of Duty asset workbench
 usage:
   atlas [GAME_FOLDER]                     open the browser
   atlas --selftest GAME_FOLDER            decode every image, report problems
-  atlas --map2zone GAME_FOLDER ZONE.ff EDITED.map OUT.ff   writes the edits of a .map made by --zone2map into the zone: entities and static model placement (added / deleted static models are refused; --rebuild-bsp builds the BSP again and drops terrain collision)
+  atlas --map2zone GAME_FOLDER ZONE.ff EDITED.map OUT.ff   writes the edits of a .map made by --zone2map into the zone: entities and static model placement (added / deleted static models are refused; --rebuild-bsp builds the BSP again, terrain collision kept; --render-new-brushes also draws new and moved brushes as GfxWorld surfaces)
   atlas --terrain2obj GAME_FOLDER ZONE.ff OUT.obj          the terrain collision of a CoDOL map as a Wavefront OBJ
   atlas --unzone GAME_FOLDER ZONE.ff OUT_DIR   every asset of a CoDOL zone as a file (map entities and raw files also as text)
   atlas --buildzone GAME_FOLDER DIR OUT.ff [--signed]   builds the zone again from those files: edited text replaces its asset, a deleted file removes it
@@ -221,7 +221,7 @@ fn main() -> Result<()> {
             let key = zone::export::find_key(&root)?;
             let path = zone::export::zone_files(&root).into_iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(zone_name))).context("no such zone")?;
             let text = std::fs::read_to_string(&map).with_context(|| format!("reading {}", map.display()))?;
-            let opts = zone::clipwrite::Options { rebuild_bsp: args.iter().any(|a| a == "--rebuild-bsp") };
+            let opts = zone::clipwrite::Options { rebuild_bsp: args.iter().any(|a| a == "--rebuild-bsp"), render_new_brushes: args.iter().any(|a| a == "--render-new-brushes") };
             let plan = zone::mapwrite::apply_with(&path, &key, &text, &out, opts)?;
             println!(
                 "{}: {} static models changed ({} with collision), entities {}; written to {}",
@@ -1088,8 +1088,10 @@ fn rendermap(args: &[String]) -> Result<()> {
     }
     let root = PathBuf::from(root);
     let key = zone::export::find_key(&root)?;
-    let path = zone::export::zone_files(&root).into_iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(zone_name))).context("no such zone")?;
+    // a path to a zone file (an unsigned one written by --map2zone, say) is used as it is
+    let path = if std::path::Path::new(zone_name).is_file() { PathBuf::from(zone_name) } else { zone::export::zone_files(&root).into_iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(zone_name))).context("no such zone")? };
     let z = zone::Zone::open(&path, &key)?;
+    let zone_name = &path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let src = zone::mapsrc::read(&z, zone_name)?;
     let mut model = zone::world::model_of_zone(&z).map(|m| m.0).unwrap_or(model::Model { name: zone_name.clone(), surfaces: Vec::new() });
     let world_surfaces = model.surfaces.len();

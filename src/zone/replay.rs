@@ -172,6 +172,16 @@ pub struct WorldRec {
     /// the count word is at header + 8).
     pub header: usize,
     pub planes: (usize, usize),
+    /// (offset, count) of each cell's aabb tree nodes (44 bytes), the sorted surface indices (16-bit) and the surface bounds
+    /// (24 bytes each, one per surface).
+    pub cell_nodes: Vec<(usize, usize)>,
+    pub sorted: (usize, usize),
+    pub surface_bounds: usize,
+    /// Arrays that hold surface numbers: (kind, offset, count) with kind 0 = sky surface starts (32-bit), 1 = shadow geometry
+    /// lists (16-bit), 2 = reflection probe lists (16-bit).
+    pub lists: Vec<(u8, usize, usize)>,
+    /// (offset, count) of the 60-byte brush models (surface run at +52 count, +54 start, +56 count without decals).
+    pub brush_models: (usize, usize),
 }
 
 /// Where the arrays of a QA / 3.19 collision map's first `ClipInfo` sit in the zone image, as the walk met them. Offsets are stream
