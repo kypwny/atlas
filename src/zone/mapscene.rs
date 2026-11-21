@@ -269,6 +269,7 @@ mod tests {
         Brush {
             sides: vec![side([-1.0, 0.0, 0.0], 0.0), side([1.0, 0.0, 0.0], 64.0), side([0.0, -1.0, 0.0], 0.0), side([0.0, 1.0, 0.0], 32.0), side([0.0, 0.0, -1.0], 0.0), side([0.0, 0.0, 1.0], 16.0)],
             contents: CONTENTS_SOLID,
+            id: crate::zone::mapsrc::NO_ID,
         }
     }
 
@@ -294,7 +295,7 @@ mod tests {
         b.sides.push(Side { normal: unit([1.0, 1.0, 0.0]), dist: unit([1.0, 1.0, 0.0])[0] * 90.0, material: "x".into() });
         assert_eq!(brush_polygons(&b).len(), 7);
         // two parallel planes enclose nothing finite
-        let open = Brush { sides: cube().sides[..2].to_vec(), contents: 0 };
+        let open = Brush { sides: cube().sides[..2].to_vec(), contents: 0, id: crate::zone::mapsrc::NO_ID };
         assert!(brush_polygons(&open).is_empty());
     }
 

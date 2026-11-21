@@ -27,6 +27,7 @@ pub mod mapsrc;
 pub mod mapscene;
 pub mod mapwrite;
 pub mod colltree;
+pub mod clipwrite;
 pub mod replay;
 pub mod stock;
 pub mod t6;

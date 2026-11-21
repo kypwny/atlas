@@ -5,8 +5,9 @@
 //! * **Static models.** Moving, turning and scaling a model rewrites its draw record (origin, axis, scale), its culling bounds
 //!   and, when the model has collision, its collision record (origin, inverse scaled axis, absolute bounds). Adding or
 //!   deleting static models changes counts and lists all over the world asset and is refused.
-//! * **Brushes.** Changed collision brushes are refused (collision planes are shared and sit in a spatial tree); a map whose
-//!   brushes are as exported goes through.
+//! * **Brushes.** Added, deleted and changed collision brushes of the world and of existing brush models are rewritten by
+//!   [`clipwrite`](super::clipwrite) (new brushes without edge data; the BSP and the terrain keep their shape). New brush
+//!   entities (a brush model that does not exist yet) are refused.
 //!
 //! Everything compared with what [`mapsrc::read`] finds in the zone, with the tolerance of the `.map`'s three decimals.
 
@@ -25,6 +26,10 @@ pub struct Plan {
     pub models_changed: usize,
     pub collision_changed: usize,
     pub entities_changed: bool,
+    /// Set when the world asset's bytes changed (static models, planes appended for new brushes).
+    pub world_changed: bool,
+    /// Set when the collision brushes were rewritten: how the old allocations of the collision asset became the new ones.
+    pub rebuilt: Option<super::writer::Rebuilt>,
     pub notes: Vec<String>,
 }
 
@@ -111,10 +116,12 @@ fn asset_containing(zone: &Zone, offset: usize) -> Result<usize> {
 
 /// What has to change in the zone to turn it into `edited`. `orig` is [`mapsrc::read`] of the same zone.
 pub fn plan(zone: &Zone, orig: &MapSource, edited: &MapSource) -> Result<Plan> {
-    let diff = brush_differences(orig, edited)?;
-    if !diff.is_empty() {
-        bail!("{} collision brushes were changed (first: {}); editing brushes is not supported yet", diff.len(), diff[..diff.len().min(5)].join(", "));
-    }
+    let brush_edit = match brush_differences(orig, edited) {
+        Ok(d) => !d.is_empty(),
+        // a different number of brushes is an edit the rewrite handles; a changed set of brush models is not
+        Err(e) if e.to_string().contains("brush models of the map differ") => return Err(e),
+        Err(_) => true,
+    };
     if orig.models.len() != edited.models.len() {
         bail!("the map has {} static models, the zone {}: adding or deleting static models is not supported yet", edited.models.len(), orig.models.len());
     }
@@ -125,7 +132,7 @@ pub fn plan(zone: &Zone, orig: &MapSource, edited: &MapSource) -> Result<Plan> {
 
     let world_at = lay.draw.first().map(|d| d.0);
     let clip_at = if lay.entity_text.2 > 0 { Some(lay.entity_text.0) } else if lay.clip_statics.1 > 0 { Some(lay.clip_statics.0) } else { None };
-    if (!changed.is_empty() && world_at.is_none()) || (entities_changed && lay.entity_text.2 == 0) {
+    if (!changed.is_empty() && world_at.is_none()) || (entities_changed && lay.entity_text.2 == 0) || (brush_edit && lay.clip_statics.1 == 0 && lay.entity_text.2 == 0) {
         bail!("this zone has no static models or entity text to write to");
     }
     if let Some(w) = world_at {
@@ -234,7 +241,47 @@ pub fn plan(zone: &Zone, orig: &MapSource, edited: &MapSource) -> Result<Plan> {
         plan.clip_blob = crate::zonefiles::with_nested_text(&plan.clip_blob, (hdr - clip_start, at - clip_start, n), &entity_text(&edited.entities));
         plan.entities_changed = true;
     }
-    if plan.models_changed == 0 && !plan.entities_changed {
+    if brush_edit {
+        match super::clipwrite::rebuild(zone, &plan.clip_blob, orig, edited)? {
+            Some(rb) => {
+                plan.clip_blob = rb.blob;
+                plan.rebuilt = Some(rb.rebuilt);
+                plan.notes.extend(rb.notes);
+                // the new brushes' planes join the world's plane array (the collision map's sides point into it): they go behind the
+                // last plane, and the count in the world header follows
+                if !rb.new_planes.is_empty() {
+                    let (wh, wp) = (lay.world_header, lay.world_planes);
+                    if wp.1 == 0 && wp.0 == 0 {
+                        bail!("this zone's world has no plane array to extend");
+                    }
+                    if plan.world_blob.is_empty() {
+                        plan.world_asset = asset_containing(zone, wp.0)?;
+                        let a = &zone.assets[plan.world_asset];
+                        plan.world_blob = zone.data[a.start..a.start + a.extent].to_vec();
+                    }
+                    let ws = zone.assets[plan.world_asset].start;
+                    let at = wp.0 + 20 * wp.1 - ws;
+                    let mut bytes = Vec::with_capacity(20 * rb.new_planes.len());
+                    for p in &rb.new_planes {
+                        for k in 0..3 {
+                            bytes.extend_from_slice(&p[k].to_le_bytes());
+                        }
+                        bytes.extend_from_slice(&p[3].to_le_bytes());
+                        let axis_type = (0..3).find(|&a| p[a].abs() > 0.9999).map_or(3u8, |a| a as u8);
+                        let signbits = (0..3).fold(0u8, |b, a| b | (((p[a] < 0.0) as u8) << a));
+                        bytes.extend_from_slice(&[axis_type, signbits, 0, 0]);
+                    }
+                    plan.world_blob.splice(at..at, bytes);
+                    let count_at = wh + 8 - ws;
+                    let n = u32::from_le_bytes(plan.world_blob[count_at..count_at + 4].try_into().unwrap()) + rb.new_planes.len() as u32;
+                    plan.world_blob[count_at..count_at + 4].copy_from_slice(&n.to_le_bytes());
+                    plan.world_changed = true;
+                }
+            }
+            None => {}
+        }
+    }
+    if plan.models_changed == 0 && !plan.entities_changed && plan.rebuilt.is_none() {
         plan.notes.push("the map matches the zone: nothing to write".to_string());
     }
     Ok(plan)
@@ -249,10 +296,12 @@ pub fn apply(zone_path: &std::path::Path, key: &super::fastfile::ArchiveKey, map
     let edited = mapsrc::parse_map(map_text)?;
     let plan = plan(&zone, &orig, &edited)?;
     let mut builder = super::writer::ZoneBuilder::from_zone(&zone);
-    if plan.models_changed > 0 {
+    if plan.models_changed > 0 || plan.world_changed {
         builder.replace_same_layout(plan.world_asset, plan.world_blob.clone());
     }
-    if plan.models_changed > 0 || plan.entities_changed {
+    if let Some(rb) = &plan.rebuilt {
+        builder.replace_rebuilt(plan.clip_asset, plan.clip_blob.clone(), rb.clone());
+    } else if plan.models_changed > 0 || plan.entities_changed {
         builder.replace_same_layout(plan.clip_asset, plan.clip_blob.clone());
     }
     let built = builder.build(&zone)?;

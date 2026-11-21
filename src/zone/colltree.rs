@@ -110,15 +110,17 @@ impl Tree {
     /// tree and the index of its root (always 0). `members` lists the brushes of this tree.
     pub fn build(boxes: &[Aabb], contents: &[u32], members: &[u16], leaf_size: usize) -> Tree {
         let mut t = Tree::default();
-        t.emit(boxes, contents, members.to_vec(), leaf_size.max(1), 0);
+        t.emit(boxes, contents, members.to_vec(), leaf_size.max(1), 0, members.first().copied().unwrap_or(0));
         t
     }
 
-    fn emit(&mut self, boxes: &[Aabb], contents: &[u32], set: Vec<u16>, leaf: usize, depth: usize) -> usize {
+    /// `dummy` is any valid brush number of the tree: an empty side is a leaf of contents 0 that lists it. The walk stops at a
+    /// node whose contents are 0 and never reads the list, and readers insist that interior nodes have children and leaves a brush.
+    fn emit(&mut self, boxes: &[Aabb], contents: &[u32], set: Vec<u16>, leaf: usize, depth: usize, dummy: u16) -> usize {
         let at = self.nodes.len();
         let all = set.iter().fold(0u32, |c, &b| c | contents[b as usize]);
         if set.is_empty() {
-            self.nodes.push(Node::default());
+            self.nodes.push(Node { count: 1, contents: 0, brushes: vec![dummy], ..Default::default() });
             return at;
         }
         let split = if set.len() > leaf && depth < 60 { Self::choose(boxes, &set) } else { None };
@@ -147,8 +149,8 @@ impl Tree {
             let c = across.iter().fold(0u32, |c, &b| c | contents[b as usize]);
             self.nodes.push(Node { count: across.len() as i16, contents: c, brushes: across, ..Default::default() });
         }
-        let a = self.emit(boxes, contents, above, leaf, depth + 1);
-        let b = self.emit(boxes, contents, below, leaf, depth + 1);
+        let a = self.emit(boxes, contents, above, leaf, depth + 1, dummy);
+        let b = self.emit(boxes, contents, below, leaf, depth + 1, dummy);
         self.nodes[at].child = [(a - at) as u16, (b - at) as u16];
         at
     }
@@ -347,6 +349,17 @@ mod tests {
         assert_eq!(t.query(0, &b[0]), vec![0]);
         let empty = Tree::build(&b, &[1], &[], 4);
         assert!(empty.query(0, &b[0]).is_empty());
+        // no interior node may have a zero child offset, and an empty side is a leaf with a brush listed (readers insist on both)
+        let all: Vec<u16> = (0..40).collect();
+        let big = boxes(40);
+        let t = Tree::build(&big, &vec![1; 40], &all, 2);
+        for n in &t.nodes {
+            if n.count <= 0 {
+                assert!(n.child[0] != 0 && n.child[1] != 0, "{n:?}");
+            } else {
+                assert!(!n.brushes.is_empty());
+            }
+        }
     }
 
     #[test]

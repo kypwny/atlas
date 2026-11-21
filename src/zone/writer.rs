@@ -23,6 +23,22 @@ pub struct BuilderAsset {
     pub origin: Option<usize>,
     /// Set when the caller changed the bytes: the walker's allocations for it are not paired with the old ones.
     pub fresh: bool,
+    /// An asset whose structure the caller rebuilt: which old allocations became which new ones, and where new pointers go.
+    pub rebuilt: Option<Rebuilt>,
+}
+
+/// How a rebuilt asset relates to the original one. Allocation numbers count the asset's own block-3 allocations in stream order.
+#[derive(Clone, Debug, Default)]
+pub struct Rebuilt {
+    /// (old allocation, new allocation): the same thing in both; pointers to the old one (from anywhere) follow it. Old
+    /// allocations that are not listed are gone, and nothing may point at them.
+    pub pairs: Vec<(usize, usize)>,
+    /// (offset of the pointer word in the new bytes, new allocation, byte offset inside it): a pointer written for the new
+    /// layout. The word's value in the bytes is only a placeholder (any block-3 looking address).
+    pub links: Vec<(usize, usize, usize)>,
+    /// (offset of a pointer word, its final value): an address the caller knows will not move (into an earlier, unchanged part of
+    /// the zone). Such words are left out of the relocation and written as given.
+    pub fixed: Vec<(usize, u32)>,
 }
 
 pub struct ZoneBuilder {
@@ -85,7 +101,7 @@ impl ZoneBuilder {
                 .assets
                 .iter()
                 .enumerate()
-                .map(|(i, e)| BuilderAsset { asset_type: e.asset_type, reference: e.reference, bytes: z.data[e.start..e.start + e.extent].to_vec(), origin: Some(i), fresh: false })
+                .map(|(i, e)| BuilderAsset { asset_type: e.asset_type, reference: e.reference, bytes: z.data[e.start..e.start + e.extent].to_vec(), origin: Some(i), fresh: false, rebuilt: None })
                 .collect(),
         }
     }
@@ -104,12 +120,21 @@ impl ZoneBuilder {
         self.assets[index].bytes = bytes;
     }
 
+    /// Replaces an asset with a rebuilt one (see [`Rebuilt`]): its own pointers must be right for the new layout already,
+    /// except the words listed as links, which are filled in once the new addresses are known; pointers into it from other
+    /// assets follow the paired allocations.
+    pub fn replace_rebuilt(&mut self, index: usize, bytes: Vec<u8>, rebuilt: Rebuilt) {
+        let a = &mut self.assets[index];
+        a.bytes = bytes;
+        a.rebuilt = Some(rebuilt);
+    }
+
     pub fn remove(&mut self, index: usize) {
         self.assets.remove(index);
     }
 
     pub fn insert(&mut self, at: usize, asset_type: u32, reference: u32, bytes: Vec<u8>) {
-        self.assets.insert(at, BuilderAsset { asset_type, reference, bytes, origin: None, fresh: true });
+        self.assets.insert(at, BuilderAsset { asset_type, reference, bytes, origin: None, fresh: true, rebuilt: None });
     }
 
     /// Lays the parts out: header, script strings, directory, asset bytes.
@@ -154,6 +179,13 @@ impl ZoneBuilder {
         for (j, a) in self.assets.iter().enumerate() {
             let (Some(o), false) = (a.origin, a.fresh) else { continue };
             let (Some(olds), Some(news)) = (old.block3.per_asset.get(&o), new.block3.per_asset.get(&j)) else { continue };
+            if let Some(r) = &a.rebuilt {
+                for &(x, y) in &r.pairs {
+                    let (Some(&x), Some(&y)) = (olds.get(x), news.get(y)) else { bail!("asset {j}: allocation pair ({x}, {y}) is out of range ({} before, {} after)", olds.len(), news.len()) };
+                    pairs.push((old.block3.starts[x].0, old.block3.starts[x].1, new.block3.starts[y].0));
+                }
+                continue;
+            }
             if olds.len() != news.len() {
                 bail!("asset {j}: {} block-3 allocations before, {} after", olds.len(), news.len());
             }
@@ -173,8 +205,16 @@ impl ZoneBuilder {
         let fresh: Vec<bool> = self.assets.iter().map(|a| a.fresh).collect();
         let mut relocated = 0usize;
         let mut lost = Vec::new();
+        // pointer words of rebuilt assets that are links (written below) and are not relocated like the others
+        let mut link_words: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for (j, a) in self.assets.iter().enumerate() {
+            if let (Some(r), Some(entry)) = (&a.rebuilt, first.assets.get(j)) {
+                link_words.extend(r.links.iter().map(|l| entry.start + l.0));
+                link_words.extend(r.fixed.iter().map(|f| entry.start + f.0));
+            }
+        }
         for w in &new.aliases {
-            if fresh.get(w.asset).copied().unwrap_or(true) {
+            if fresh.get(w.asset).copied().unwrap_or(true) || link_words.contains(&w.at) {
                 continue;
             }
             let v = w.value;
@@ -202,6 +242,20 @@ impl ZoneBuilder {
         }
         if !lost.is_empty() {
             bail!("{} references point at memory that no longer exists, e.g. asset {} -> {:#x}", lost.len(), lost[0].0, lost[0].1);
+        }
+        // the pointers a rebuilt asset got for its new allocations
+        for (j, a) in self.assets.iter().enumerate() {
+            let (Some(r), Some(entry)) = (&a.rebuilt, first.assets.get(j)) else { continue };
+            let Some(news) = new.block3.per_asset.get(&j) else { continue };
+            for &(word, value) in &r.fixed {
+                image[entry.start + word..entry.start + word + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            for &(word, alloc, offset) in &r.links {
+                let Some(&k) = news.get(alloc) else { bail!("asset {j}: link to allocation {alloc}, which does not exist ({} allocations)", news.len()) };
+                let target = new.block3.starts[k].0 + offset as u32;
+                image[entry.start + word..entry.start + word + 4].copy_from_slice(&target.to_le_bytes());
+                relocated += 1;
+            }
         }
 
         // pass 2: record the real sizes and check the finished image

@@ -21,7 +21,12 @@ pub struct Side {
 pub struct Brush {
     pub sides: Vec<Side>,
     pub contents: u32,
+    /// The brush's number in the zone's brush array; [`NO_ID`] for a brush read from a `.map`.
+    pub id: u32,
 }
+
+/// `Brush::id` of a brush that is not (yet) in a zone.
+pub const NO_ID: u32 = u32::MAX;
 
 #[derive(Debug, Clone)]
 pub struct StaticModel {
@@ -57,6 +62,9 @@ pub struct Layout {
     pub clip_statics: (usize, usize),
     /// Header offset, text offset and length (with the NUL) of the entity string; zero length when there is none.
     pub entity_text: (usize, usize, usize),
+    /// Offset of the world header, and offset and count of the plane array (20-byte planes) the collision map's sides point into.
+    pub world_header: usize,
+    pub world_planes: (usize, usize),
 }
 
 #[derive(Debug, Default)]
@@ -83,16 +91,16 @@ fn u16_at(d: &[u8], o: usize) -> u16 {
 }
 
 /// Address -> stream offset, for pointer words that lead to earlier arrays.
-pub(crate) struct Resolver {
+pub struct Resolver {
     spans: Vec<(u32, usize, usize)>,
 }
 
 impl Resolver {
-    pub(crate) fn new(mut spans: Vec<(u32, usize, usize)>) -> Resolver {
+    pub fn new(mut spans: Vec<(u32, usize, usize)>) -> Resolver {
         spans.sort_by_key(|s| s.0);
         Resolver { spans }
     }
-    pub(crate) fn offset(&self, ptr: u32) -> Option<usize> {
+    pub fn offset(&self, ptr: u32) -> Option<usize> {
         let i = self.spans.partition_point(|s| s.0 <= ptr);
         let (address, off, len) = *self.spans.get(i.checked_sub(1)?)?;
         let delta = (ptr - address) as usize;
@@ -145,7 +153,10 @@ fn brushes_of(zone: &Zone, c: &ClipRec, r: &Resolver, notes: &mut Vec<String>) -
                 continue;
             }
             let s = c.sides.0 + 8 * idx;
-            let Some(po) = r.offset(u32_at(d, s)) else {
+            let ptr = u32_at(d, s);
+            // a side that carries its plane has -1 here; the planes of such sides follow the sides array, in side order
+            let inline = (ptr == u32::MAX).then(|| c.sides.0 + 8 * c.sides.1 + 20 * (0..idx).filter(|&q| u32_at(d, c.sides.0 + 8 * q) == u32::MAX).count());
+            let Some(po) = inline.or_else(|| r.offset(ptr)) else {
                 bad_plane += 1;
                 continue;
             };
@@ -157,7 +168,7 @@ fn brushes_of(zone: &Zone, c: &ClipRec, r: &Resolver, notes: &mut Vec<String>) -
             sides.push(Side { normal, dist: f32_at(d, po + 12), material: material(u16_at(d, s + 4) as i16 as i32) });
         }
         let contents = if c.contents != 0 { u32_at(d, c.contents + 4 * i) } else { 0 };
-        out.push(Brush { sides, contents });
+        out.push(Brush { sides, contents, id: i as u32 });
     }
     if bad_plane + bad_range > 0 {
         notes.push(format!("collision info {}: {bad_plane} side planes unresolved, {bad_range} sides out of range", c.tag));
@@ -190,6 +201,10 @@ fn tree_brushes(zone: &Zone, c: &ClipRec, r: &Resolver, start: usize) -> Vec<usi
                 }
             }
         } else {
+            // a negative count: the brushes that straddle this node's plane are the leaf at the next node
+            if leaves < 0 {
+                stack.push(i + 1);
+            }
             for k in 0..2 {
                 stack.push(i + u16_at(d, o + 16 + 2 * k) as usize);
             }
@@ -267,7 +282,7 @@ pub fn parse_map(text: &str) -> Result<MapSource> {
                 match depth {
                     2 => {
                         let contents = 1;
-                        brushes.push(Brush { sides: std::mem::take(&mut brush), contents });
+                        brushes.push(Brush { sides: std::mem::take(&mut brush), contents, id: NO_ID });
                     }
                     1 => {
                         let e = cur.take().ok_or_else(|| anyhow::anyhow!("line {}: stray }}", n + 1))?;
@@ -398,6 +413,8 @@ pub fn read(zone: &Zone, name: &str) -> Result<MapSource> {
     if let Some(w) = r.rec.world.as_ref() {
         let d = &zone.data;
         out.layout.insts = w.static_insts;
+        out.layout.world_header = w.header;
+        out.layout.world_planes = w.planes;
         for (index, (at, model)) in w.static_models.iter().enumerate() {
             let Some(model) = model else { continue };
             out.layout.draw.push((*at, index));

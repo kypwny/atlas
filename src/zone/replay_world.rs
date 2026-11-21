@@ -35,7 +35,7 @@ impl<'a> Replay<'a> {
         }
         if self.apply {
             let name = self.str_of(self.rd32(h), name_at);
-            self.rec.world = Some(WorldRec { name, ..Default::default() });
+            self.rec.world = Some(WorldRec { name, header: h, ..Default::default() });
         }
         let count = self.rd32(h + 20);
         if count > i32::MAX as u32 {
@@ -54,7 +54,12 @@ impl<'a> Replay<'a> {
         }
         if self.ptr(h + 56) == INLINE {
             let n = self.rd32(h + 8);
-            self.bytes(n, 20, 4)?;
+            let at = self.bytes(n, 20, 4)?;
+            if self.apply {
+                if let Some(w) = self.rec.world.as_mut() {
+                    w.planes = (at, n as usize);
+                }
+            }
         }
         if self.rd32(h + 60) != 0 {
             let n = self.rd32(h + 12);
@@ -524,7 +529,8 @@ impl<'a> Replay<'a> {
         }
         if self.ptr(c + 28) == INLINE {
             let n = self.rd32(c + 24);
-            self.bytes(n, 1, 1)?;
+            let at = self.bytes(n, 1, 1)?;
+            self.clip_note(|k| k.edges = (at, n as usize));
         }
         if self.ptr(c + 36) == INLINE {
             let n = self.rd32(c + 32);
@@ -593,6 +599,9 @@ impl<'a> Replay<'a> {
         }
         if pointer >= INSERT {
             let info = self.bytes(1, 64, 4)?;
+            if self.apply && self.clip_tag == 1 {
+                self.rec.clip_pinfo = info;
+            }
             self.qa_clip_info(info)?;
         }
         self.pop()
@@ -776,6 +785,9 @@ impl<'a> Replay<'a> {
         if self.rd32(h + 88) != 0 {
             let n = self.rd32(h + 84);
             let records = self.bytes(n, 8, 4)?;
+            if self.apply {
+                self.rec.clip_nodes = (records, n as usize);
+            }
             for i in 0..n as usize {
                 let p = self.rd32(records + 8 * i);
                 if p != 0 {

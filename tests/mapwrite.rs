@@ -84,11 +84,6 @@ fn an_edited_map_goes_back_into_the_zone() {
         assert_eq!(after.submodels.len(), orig.submodels.len());
 
         // 4. what is not supported is refused
-        let mut brush_edit = map.clone();
-        let at = brush_edit.find("// brush 0\n{\n").unwrap() + "// brush 0\n{\n".len();
-        brush_edit.insert_str(at, "( 0 0 0 ) ( 0 1 0 ) ( 1 0 0 ) caulk 128 128 0 0 0 0 lightmap_gray 16384 16384 0 0 0 0\n");
-        let err = mapwrite::apply(&path, &key, &brush_edit, &dir.join("no.ff")).unwrap_err().to_string();
-        assert!(err.contains("brush"), "{name}: {err}");
         let (s, e) = find_entity(&map, 3);
         let mut deleted = map.clone();
         deleted.replace_range(s..e, "");
@@ -139,4 +134,124 @@ fn collision_of_a_moved_static_model_moves_too() {
         assert_eq!(f(&zone, c0 + 76 * other + 4 + 4 * k).to_bits(), f(&after, c0 + 76 * other + 4 + 4 * k).to_bits());
     }
     let _ = std::fs::remove_file(out);
+}
+
+fn brush_span(text: &str, idx: usize) -> (usize, usize) {
+    let start = text.find(&format!("// brush {idx}\n{{\n")).unwrap();
+    let end = start + text[start..].find("\n}\n").unwrap() + 3;
+    (start, end)
+}
+
+/// Brushes deleted, added and changed in the .map go back into the collision map; the trees find them, the rest is untouched.
+#[test]
+fn brushes_can_be_deleted_added_and_changed() {
+    let Some(root) = std::env::var_os("CODOL_TEST_319").map(PathBuf::from) else { return };
+    let key = export::find_key(&root).unwrap();
+    for name in ["mp_dr_cistern.ff", "mp_bridge.ff"] {
+        let path = find(&root, name);
+        let zone = Zone::open(&path, &key).unwrap();
+        let orig = mapsrc::read(&zone, name).unwrap();
+        let before_tree = atlas::zone::colltree::read(&zone).unwrap();
+        let map = mapsrc::to_map(&orig);
+
+        // delete world brush 5, move brush 7 by 24 units in x (a changed brush), and add a 64 unit cube at the origin
+        let mut edited = map.clone();
+        let (s7, e7) = brush_span(&edited, 7);
+        let moved = {
+            let block = &edited[s7..e7];
+            let mut out = String::new();
+            for line in block.lines() {
+                if line.starts_with('(') {
+                    let mut rebuilt = String::new();
+                    let mut rest = line;
+                    for _ in 0..3 {
+                        let open = rest.find('(').unwrap();
+                        let close = rest.find(')').unwrap();
+                        let t: Vec<f64> = rest[open + 1..close].split_whitespace().map(|x| x.parse().unwrap()).collect();
+                        rebuilt.push_str(&format!("( {} {} {} ) ", t[0] + 24.0, t[1], t[2]));
+                        rest = &rest[close + 1..];
+                    }
+                    out.push_str(&rebuilt);
+                    out.push_str(rest.trim_start());
+                } else {
+                    out.push_str(line);
+                }
+                out.push('\n');
+            }
+            out
+        };
+        edited.replace_range(s7..e7, &moved);
+        let (s5, e5) = brush_span(&edited, 5);
+        edited.replace_range(s5..e5, "");
+        // a 64 unit cube, written by the exporter itself so that the plane winding is right
+        let side = |n: [f64; 3], d: f64| mapsrc::Side { normal: n, dist: d, material: "caulk".into() };
+        let cube_brush = mapsrc::Brush {
+            sides: vec![side([-1.0, 0.0, 0.0], 0.0), side([1.0, 0.0, 0.0], 64.0), side([0.0, -1.0, 0.0], 0.0), side([0.0, 1.0, 0.0], 64.0), side([0.0, 0.0, -1.0], 0.0), side([0.0, 0.0, 1.0], 64.0)],
+            contents: 1,
+            id: mapsrc::NO_ID,
+        };
+        let cube_map = mapsrc::to_map(&mapsrc::MapSource { entities: vec![mapsrc::Entity { keys: vec![("classname".into(), "worldspawn".into())] }], world: vec![cube_brush], ..Default::default() });
+        let cube_start = cube_map.find("// brush 0").unwrap();
+        let cube = format!("{}
+", cube_map[cube_start..].trim_end().trim_end_matches('}').trim_end()).replace("// brush 0", "// brush new");
+        // into the world entity: before its closing brace
+        let world_end = edited.find("\n}\n// entity 1\n").unwrap() + 1;
+        edited.insert_str(world_end, &cube);
+
+        let dir = std::env::temp_dir().join(format!("atlas_brushes_{}_{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("out.ff");
+        let plan = mapwrite::apply(&path, &key, &edited, &out).unwrap();
+        println!("{name}: {:?}", plan.notes);
+        assert!(plan.rebuilt.is_some(), "{name}");
+
+        let after_zone = Zone::open(&out, &key).unwrap();
+        let after = mapsrc::read(&after_zone, name).unwrap();
+        // the old brush 5 is gone (contents 0), brush 7 became a new brush, one cube is new: world = orig - 2 + 2 + 1
+        // deleted brushes stay in the arrays with contents 0; two went (brush 5, the old brush 7) and two came (the cube, the moved brush)
+        let tot = |m: &mapsrc::MapSource| m.submodels.iter().map(|s| s.1.len()).sum::<usize>();
+        println!("{name}: world {} -> {}, brush model brushes {} -> {}, models with brushes {} -> {}", orig.world.len(), after.world.len(), tot(&orig), tot(&after), orig.submodels.iter().filter(|s| !s.1.is_empty()).count(), after.submodels.iter().filter(|s| !s.1.is_empty()).count());
+        assert_eq!(after.world.len(), orig.world.len() + 2, "{name}: world brush records");
+        assert_eq!(after.world.iter().filter(|b| b.contents != 0).count(), orig.world.iter().filter(|b| b.contents != 0).count(), "{name}: brushes in play");
+        let has = |m: &mapsrc::MapSource, f: &dyn Fn(&mapsrc::Brush) -> bool| m.world.iter().filter(|b| b.contents != 0).any(|b| f(b));
+        // a cube: six planes at 0 and 64
+        let is_cube = |b: &mapsrc::Brush| b.sides.len() >= 6 && b.sides.iter().filter(|s| (s.dist - 64.0).abs() < 0.1 || s.dist.abs() < 0.1).count() >= 6;
+        assert!(has(&after, &is_cube), "{name}: the new cube is not there");
+        // the moved brush: the same planes shifted by 24 in x, as a set (a rewritten brush keeps its non-axial planes and gets its
+        // six axial ones from its bounds, so the order and the list can differ)
+        let moved7 = &orig.world[7];
+        let shifted: Vec<([f64; 3], f64)> = moved7.sides.iter().map(|y| (y.normal, y.dist + 24.0 * y.normal[0])).collect();
+        let near = |x: &mapsrc::Side, n: &[f64; 3], d: f64| (0..3).all(|k| (x.normal[k] - n[k]).abs() < 0.01) && (x.dist - d).abs() < 0.2;
+        if !has(&after, &|b| shifted.iter().all(|(n, d)| b.sides.iter().any(|x| near(x, n, *d))) && b.sides.iter().all(|x| shifted.iter().any(|(n, d)| near(x, n, *d)))) {
+            println!("expected planes {:?}", shifted);
+            for b in after.world.iter().filter(|b| b.contents != 0 && b.id as usize >= before_tree.boxes.len()) {
+                println!("new brush {}: {:?}", b.id, b.sides.iter().map(|x| (x.normal, x.dist)).collect::<Vec<_>>());
+            }
+        }
+        assert!(
+            has(&after, &|b| shifted.iter().all(|(n, d)| b.sides.iter().any(|x| near(x, n, *d))) && b.sides.iter().all(|x| shifted.iter().any(|(n, d)| near(x, n, *d)))),
+            "{name}: the moved brush is not there"
+        );
+        // brush models are untouched
+        assert_eq!(after.submodels.iter().filter(|s| !s.1.is_empty()).count(), orig.submodels.iter().filter(|s| !s.1.is_empty()).count());
+        // the trees are sound: every brush that is in play is listed by some leaf tree and found by walking it
+        let t = atlas::zone::colltree::read(&after_zone).unwrap();
+        let mut found = vec![false; t.boxes.len()];
+        for &root in &t.leaf_roots {
+            let mut mine = Vec::new();
+            t.tree_brushes(root, &mut mine);
+            for b in mine {
+                if t.tree.query(root, &t.boxes[b as usize]).contains(&b) {
+                    found[b as usize] = true;
+                }
+            }
+        }
+        let new_ids: Vec<usize> = after.world.iter().map(|b| b.id as usize).filter(|&i| i >= before_tree.boxes.len()).collect();
+        assert_eq!(new_ids.len(), 2, "{name}: two new brushes expected");
+        for id in &new_ids {
+            assert!(found[*id], "{name}: new brush {id} is in no leaf tree");
+        }
+        assert_eq!(t.contents[orig.world[5].id as usize], 0, "{name}: the deleted brush still has contents");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
