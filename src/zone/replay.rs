@@ -370,7 +370,7 @@ impl<'a> Replay<'a> {
         if super::u32_at(&zone.data, 44) != 0 {
             let strings = r.bytes(zone.string_count as u32, 4, 4)?;
             for i in 0..zone.string_count {
-                if r.rd32(strings + 4 * i) == INLINE {
+                if r.ptr(strings + 4 * i) == INLINE {
                     r.string()?;
                 }
             }
@@ -432,13 +432,37 @@ impl<'a> Replay<'a> {
         v
     }
 
+    /// Reads a pointer word. A value that is neither null nor a "data follows" marker is the block-3 address of something read
+    /// earlier (a shared name, technique, plane array ...): with tracing on it is recorded, so the writer moves it with its target.
+    pub(super) fn ptr(&self, o: usize) -> u32 {
+        let v = self.rd32(o);
+        if self.tracing && self.apply && self.is_block_three_address(v) {
+            self.alias_words.borrow_mut().push(AliasWord { asset: self.cur_asset, at: self.adjust(o), value: v });
+        }
+        v
+    }
+
+    /// Whether a word can be the address of something already placed in block 3 (addresses are offset + 1). Floats between
+    /// 4.7e-10 and 2 share the top nibble, but their "offset" lies far beyond anything a zone has placed.
+    fn is_block_three_address(&self, v: u32) -> bool {
+        v >> 28 == 3 && (v & 0x0fff_ffff) >= 1 && ((v & 0x0fff_ffff) as usize - 1) < self.position[3]
+    }
+
+    /// Records a pointer value that was read with `rd32` just before (see `ptr`).
+    pub(super) fn note_pointer(&self, value: u32) {
+        if self.is_block_three_address(value) {
+            self.note_alias(value);
+        }
+    }
+
     /// Starts recording address-bearing words and block-3 allocations (call before replaying assets).
     pub fn enable_tracing(&mut self) {
         self.tracing = true;
     }
 
     pub fn alias_words(&self) -> Vec<AliasWord> {
-        self.alias_words.borrow().clone()
+        let mut seen = std::collections::HashSet::new();
+        self.alias_words.borrow().iter().filter(|w| seen.insert(w.at)).cloned().collect()
     }
 
     /// Block-3 allocations in order: (asset index, address as the stream stores references to it, length).
@@ -681,11 +705,11 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, if map { 72 } else if self.stock { 44 } else { 68 }, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         if !map {
-            if self.rd32(h + 28) == INLINE {
+            if self.ptr(h + 28) == INLINE {
                 self.string()?;
             }
         } else if self.rd32(h + 8) != 0 {
@@ -730,7 +754,7 @@ impl<'a> Replay<'a> {
         let (hsize, stride, vc, tc, tri, bc, bp, vp, rc, rp) = if self.stock { (36usize, 64usize, 2usize, 4usize, 12usize, 16usize, 24usize, 28usize, 32usize, 36usize) } else { (48, 84, 4, 6, 16, 20, 28, 32, 40, 44) };
         self.reserve(0, hsize, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         // observation: the surfaces' own name
@@ -745,7 +769,7 @@ impl<'a> Replay<'a> {
             let surfaces = self.bytes(count, stride, 4)?;
             for i in 0..count as usize {
                 let s = surfaces + stride * i;
-                if self.rd32(s + bp) == INLINE {
+                if self.ptr(s + bp) == INLINE {
                     let mut blend = 0u32;
                     for j in 0..4u32 {
                         let n = self.rd16(s + bc + 2 * j as usize);
@@ -757,16 +781,16 @@ impl<'a> Replay<'a> {
                     self.bytes(blend, 2, 2)?;
                 }
                 self.push(6)?;
-                if self.rd32(s + vp) == INLINE {
+                if self.ptr(s + vp) == INLINE {
                     let n = self.rd16(s + vc);
                     self.bytes(n, 32, 16)?;
                 }
                 self.pop()?;
-                if self.rd32(s + rp) == INLINE {
+                if self.ptr(s + rp) == INLINE {
                     let n = self.rd32(s + rc);
                     let rigid = self.bytes(n, 12, 4)?;
                     for j in 0..n as usize {
-                        if self.rd32(rigid + 12 * j + 8) == INLINE {
+                        if self.ptr(rigid + 12 * j + 8) == INLINE {
                             let tree = self.bytes(1, 40, 4)?;
                             if self.rd32(tree + 28) != 0 {
                                 let n = self.rd32(tree + 24);
@@ -780,7 +804,7 @@ impl<'a> Replay<'a> {
                     }
                 }
                 self.push(7)?;
-                if self.rd32(s + tri) == INLINE {
+                if self.ptr(s + tri) == INLINE {
                     let n = self.rd16(s + tc);
                     self.bytes(n, 6, 16)?;
                 }
@@ -796,7 +820,7 @@ impl<'a> Replay<'a> {
         let (size, name_at) = if self.stock { (32, 28) } else if self.qa() { (52, 48) } else { (36, 32) };
         self.reserve(0, size, 4, true)?;
         self.push(3)?;
-        if self.rd32(h + name_at) == INLINE {
+        if self.ptr(h + name_at) == INLINE {
             self.string()?;
         }
         // observation
@@ -806,7 +830,7 @@ impl<'a> Replay<'a> {
             self.rec.data.push(DataRec::Header { kind: "image", name: name.clone(), bytes: self.src[h..h + size].to_vec() });
             self.rec.images.insert(h, name);
         }
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             // stock IW4: the texture's load definition and data are temporary (block 0)
             if self.stock {
                 self.push(0)?;
@@ -850,7 +874,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, if declaration { 100 } else { 16 }, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         if !declaration && self.rd32(h + 8) != 0 {
@@ -865,6 +889,7 @@ impl<'a> Replay<'a> {
     }
 
     fn shader_reference(&mut self, reference: u32, declaration: bool) -> Res {
+        self.note_pointer(reference);
         self.push(0)?;
         if reference >= INSERT {
             if reference == INSERT {
@@ -882,7 +907,7 @@ impl<'a> Replay<'a> {
         let size = if self.v319() { 212 } else if self.qa() { 208 } else { 204 };
         self.reserve(0, size, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         if self.apply {
@@ -892,7 +917,7 @@ impl<'a> Replay<'a> {
             self.rec.g_last_techset_start = h as i64;
         }
         for i in 0..slots {
-            if self.rd32(h + techniques + 4 * i) == INLINE {
+            if self.ptr(h + techniques + 4 * i) == INLINE {
                 let technique = self.bytes(1, 8, 4)?;
                 let count = self.rd16(technique + 6);
                 let passes = self.bytes(count, 20, 1)?;
@@ -906,13 +931,13 @@ impl<'a> Replay<'a> {
                         let args = self.bytes(n, 8, 4)?;
                         for k in 0..n as usize {
                             let t = self.rd16(args + 8 * k);
-                            if (t == 1 || t == 7) && self.rd32(args + 8 * k + 4) == INLINE {
+                            if (t == 1 || t == 7) && self.ptr(args + 8 * k + 4) == INLINE {
                                 self.bytes(1, 16, 4)?;
                             }
                         }
                     }
                 }
-                if self.rd32(technique) == INLINE {
+                if self.ptr(technique) == INLINE {
                     self.string()?;
                 }
             }
@@ -930,7 +955,7 @@ impl<'a> Replay<'a> {
         let (name, techset, arrays, counts, size) = if self.iw4_sizes() { (0usize, 80usize, 84usize, 72usize, 96usize) } else { (16usize, 88usize, 92usize, if self.v319() { 81usize } else { 80usize }, 104usize) };
         self.reserve(0, size, 4, true)?;
         self.push(3)?;
-        if self.rd32(h + name) == INLINE {
+        if self.ptr(h + name) == INLINE {
             self.string()?;
         }
         let techset_ref = self.rd32(h + techset);
@@ -938,14 +963,14 @@ impl<'a> Replay<'a> {
         self.asset_reference(techset_ref, Kind::TechSet)?;
         let techset_start = if techset_ref >= INSERT { self.rec.g_last_techset_start } else { -1 };
         let mut textures = None;
-        if self.rd32(h + arrays) == INLINE {
+        if self.ptr(h + arrays) == INLINE {
             let tex_base = align_up(self.position[3], 4);
             let n = self.rd8(h + counts);
             let t = self.bytes(n, 12, 4)?;
             textures = Some(t);
             for i in 0..n as usize {
                 let texture = t + 12 * i;
-                let r = self.rd32(texture + 8);
+                let r = self.ptr(texture + 8);
                 if self.src[texture + 7] == 11 {
                     if r == INLINE {
                         self.water()?;
@@ -960,13 +985,13 @@ impl<'a> Replay<'a> {
             }
         }
         let mut constants = Vec::new();
-        if self.rd32(h + arrays + 4) == INLINE {
+        if self.ptr(h + arrays + 4) == INLINE {
             let n = self.rd8(h + counts + 1);
             let at = self.bytes(n, 32, 16)?;
             constants = self.src[at..at + 32 * n as usize].to_vec();
         }
         let mut state_bits = Vec::new();
-        if self.rd32(h + arrays + 8) == INLINE {
+        if self.ptr(h + arrays + 8) == INLINE {
             let n = self.rd8(h + counts + 2);
             let at = self.bytes(n, 8, 4)?;
             state_bits = self.src[at..at + 8 * n as usize].to_vec();
@@ -1023,12 +1048,12 @@ impl<'a> Replay<'a> {
         if self.src[h + 5] > self.src[h + 4] {
             return Err(self.fail("model root bones"));
         }
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         let mut skel_at = [None::<usize>; 6];
         for i in 0..6 {
-            if self.rd32(h + 36 + shift + 4 * i) == INLINE {
+            if self.ptr(h + 36 + shift + 4 * i) == INLINE {
                 let (bones, roots) = (self.rd8(h + 4), self.rd8(h + 5));
                 let count = if (1..=3).contains(&i) { bones - roots } else { bones };
                 skel_at[i] = Some(self.bytes(count, STRIDES[i], ALIGNS[i])?);
@@ -1058,7 +1083,7 @@ impl<'a> Replay<'a> {
             self.asset_reference(r, Kind::Surfs)?;
             self.rec.cur_lod_start[i] = if r >= INSERT { self.rec.g_last_surfs_start } else { -1 };
             self.rec.cur_lod_ref[i] = r;
-            if !self.stock && self.rd32(lod + 12) == INLINE {
+            if !self.stock && self.ptr(lod + 12) == INLINE {
                 self.string()?;
             }
         }
@@ -1067,7 +1092,7 @@ impl<'a> Replay<'a> {
             let count = self.rd32(h + 0x130 - 56 + tail);
             let surfaces = self.bytes(count, 44, 4)?;
             for i in 0..count as usize {
-                let entries = self.rd32(surfaces + 44 * i);
+                let entries = self.ptr(surfaces + 44 * i);
                 let inline = if self.qa() { entries == INLINE } else { entries != 0 };
                 if inline {
                     let n = self.rd32(surfaces + 44 * i + 4);
@@ -1123,7 +1148,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 88, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         let (mut names_at, mut notify_at) = (None, None);
@@ -1209,6 +1234,7 @@ impl<'a> Replay<'a> {
     }
 
     fn effect_visual(&mut self, ty: u32, reference: u32, slot: u32) -> Res {
+        self.note_pointer(reference);
         let start = self.pos;
         if ty == 12 || ty == 14 {
             return if reference != INLINE { Ok(()) } else { self.string() };
@@ -1227,7 +1253,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 32, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         let mut count = 0u64;
@@ -1276,7 +1302,7 @@ impl<'a> Replay<'a> {
                     }
                 }
                 for j in [216usize, 220, 224] {
-                    if self.rd32(e + j) == INLINE {
+                    if self.ptr(e + j) == INLINE {
                         self.string()?;
                     }
                 }
@@ -1297,7 +1323,7 @@ impl<'a> Replay<'a> {
                         self.bytes(1, 1, 1)?;
                     }
                 }
-                if !self.stock && self.rd32(e + 256) == INLINE {
+                if !self.stock && self.ptr(e + 256) == INLINE {
                     self.string()?;
                 }
             }
@@ -1311,7 +1337,7 @@ impl<'a> Replay<'a> {
         let (size, data) = if self.stock { (44usize, 40usize) } else { (48, 44) };
         self.reserve(0, size, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         self.push(0)?;
@@ -1331,7 +1357,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 136, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         self.pop()
@@ -1341,14 +1367,14 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 12, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         let count = self.rd32(h + 8);
         if count > i32::MAX as u32 {
             return Err(self.fail("sound alias count"));
         }
-        if self.rd32(h + 4) == INLINE {
+        if self.ptr(h + 4) == INLINE {
             // the alias record is 100 bytes in IW4 and 108 in CoDOL (8 more before the falloff curve)
             let (stride, curve, speaker) = if self.stock { (100usize, 80usize, 96usize) } else { (108, 88, 104) };
             let array = self.block_three_reference();
@@ -1356,11 +1382,11 @@ impl<'a> Replay<'a> {
             for i in 0..count as usize {
                 let a = aliases + i * stride;
                 for j in (0..=16).step_by(4) {
-                    if self.rd32(a + j) == INLINE {
+                    if self.ptr(a + j) == INLINE {
                         self.string()?;
                     }
                 }
-                if self.rd32(a + 20) == INLINE {
+                if self.ptr(a + 20) == INLINE {
                     let record = self.block_three_reference();
                     let file = self.bytes(1, 12, 4)?;
                     if self.src[file] == 1 {
@@ -1368,7 +1394,7 @@ impl<'a> Replay<'a> {
                         self.field_asset_reference(r, record + 4, Kind::LoadedSound)?;
                     } else {
                         for j in [4usize, 8] {
-                            if self.rd32(file + j) == INLINE {
+                            if self.ptr(file + j) == INLINE {
                                 self.string()?;
                             }
                         }
@@ -1376,9 +1402,9 @@ impl<'a> Replay<'a> {
                 }
                 let r = self.rd32(a + curve);
                 self.field_asset_reference(r, array + (i * stride) as u32 + curve as u32, Kind::SoundCurve)?;
-                if self.rd32(a + speaker) == INLINE {
+                if self.ptr(a + speaker) == INLINE {
                     let speakers = self.bytes(1, 408, 4)?;
-                    if self.rd32(speakers + 4) == INLINE {
+                    if self.ptr(speakers + 4) == INLINE {
                         self.string()?;
                     }
                 }
@@ -1391,7 +1417,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, if self.qa() { 116 } else { 112 }, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         self.asset_reference(self.rd32(h + 4), Kind::Material)?;
@@ -1402,11 +1428,12 @@ impl<'a> Replay<'a> {
     }
 
     fn sound_name(&mut self, reference: u32) -> Res {
+        self.note_pointer(reference);
         if reference != INLINE {
             return Ok(());
         }
         let name = self.bytes(1, 4, 4)?;
-        if self.rd32(name) != INLINE { Ok(()) } else { self.string() }
+        if self.ptr(name) != INLINE { Ok(()) } else { self.string() }
     }
 
     fn weapon(&mut self) -> Res {
@@ -1488,7 +1515,7 @@ impl<'a> Replay<'a> {
         for &(base, n, kind) in FIELDS {
             for j in 0..n {
                 let offset = base + 4 * j;
-                let r = self.rd32(h + offset);
+                let r = self.ptr(h + offset);
                 match kind {
                     Str => {
                         let at = self.pos;
@@ -1536,7 +1563,7 @@ impl<'a> Replay<'a> {
 
     /// A string pointer: the text follows when the pointer is -1.
     fn field_string(&mut self, at: usize) -> Res {
-        if self.rd32(at) == INLINE {
+        if self.ptr(at) == INLINE {
             self.string()?;
         }
         Ok(())
@@ -1544,7 +1571,7 @@ impl<'a> Replay<'a> {
 
     /// `count` string pointers behind an array pointer.
     fn field_strings(&mut self, at: usize, count: u32) -> Res {
-        if self.rd32(at) == INLINE {
+        if self.ptr(at) == INLINE {
             let list = self.bytes(count, 4, 4)?;
             for i in 0..count as usize {
                 self.field_string(list + 4 * i)?;
@@ -1555,7 +1582,7 @@ impl<'a> Replay<'a> {
 
     /// `count` asset pointers behind an array pointer.
     fn field_assets(&mut self, at: usize, count: u32, kind: Kind) -> Res {
-        if self.rd32(at) == INLINE {
+        if self.ptr(at) == INLINE {
             let list = self.bytes(count, 4, 4)?;
             for i in 0..count as usize {
                 self.asset_reference(self.rd32(list + 4 * i), kind)?;
@@ -1566,7 +1593,7 @@ impl<'a> Replay<'a> {
 
     /// `count` elements of `stride` bytes behind a pointer (no pointers inside).
     fn field_array(&mut self, at: usize, count: u32, stride: usize, align: usize) -> Res {
-        if self.rd32(at) == INLINE {
+        if self.ptr(at) == INLINE {
             self.bytes(count, stride, align)?;
         }
         Ok(())
@@ -1582,7 +1609,7 @@ impl<'a> Replay<'a> {
         let name_at = self.pos;
         let mut stock_record = None;
         self.field_string(h)?;
-        if self.rd32(h + 4) == INLINE {
+        if self.ptr(h + 4) == INLINE {
             let d = self.bytes(1, 1668, 4)?;
             if self.apply {
                 let mut record = self.src[h..h + 116].to_vec();
@@ -1606,7 +1633,7 @@ impl<'a> Replay<'a> {
             for k in 0..47usize {
                 self.sound_name(self.rd32(d + 80 + 4 * k))?;
             }
-            if self.rd32(d + 268) == INLINE {
+            if self.ptr(d + 268) == INLINE {
                 let names = self.bytes(31, 4, 4)?;
                 for k in 0..31 {
                     self.sound_name(self.rd32(names + 4 * k))?;
@@ -1723,15 +1750,15 @@ impl<'a> Replay<'a> {
         self.reserve(0, 0x314, 4, true)?;
         self.push(3)?;
         for o in NAMES {
-            if self.rd32(h + o) == INLINE {
+            if self.ptr(h + o) == INLINE {
                 self.string()?;
             }
         }
         self.asset_reference(self.rd32(h + 0xb0), Kind::Preset)?;
-        if self.rd32(h + 0xb4) == INLINE {
+        if self.ptr(h + 0xb4) == INLINE {
             self.string()?;
         }
-        if self.rd32(h + 0x190) == INLINE {
+        if self.ptr(h + 0x190) == INLINE {
             self.string()?;
         }
         self.asset_reference(self.rd32(h + 0x194), Kind::Weapon)?;
@@ -1744,7 +1771,7 @@ impl<'a> Replay<'a> {
         for o in SOUNDS {
             self.sound_name(self.rd32(h + o))?;
         }
-        if self.rd32(h + 0x238) == INLINE {
+        if self.ptr(h + 0x238) == INLINE {
             self.string()?;
         }
         for i in 0..31 {
@@ -1757,7 +1784,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 12, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         if self.rd32(h + 8) != 0 {
@@ -1769,7 +1796,7 @@ impl<'a> Replay<'a> {
             for i in 0..count as usize {
                 let ty = self.rd8(fields + 12 * i);
                 let string = (ty < 16 && !(4..=9).contains(&ty)) || ty == 39 || ty == 42 || ty == 43;
-                if string && self.rd32(fields + 12 * i + 8) == INLINE {
+                if string && self.ptr(fields + 12 * i + 8) == INLINE {
                     self.string()?;
                 }
             }
@@ -1781,7 +1808,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 8, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         if self.rd32(h + 4) != 0 {
@@ -1800,11 +1827,11 @@ impl<'a> Replay<'a> {
         self.reserve(0, 8, 4, true)?;
         self.push(3)?;
         let value_at = self.pos;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         let key_at = self.pos;
-        if self.rd32(h + 4) == INLINE {
+        if self.ptr(h + 4) == INLINE {
             self.string()?;
         }
         if self.apply {
@@ -1818,17 +1845,17 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 20, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
-        if self.rd32(h + 16) == INLINE {
+        if self.ptr(h + 16) == INLINE {
             let count = self.rd32(h + 12);
             if count > i32::MAX as u32 {
                 return Err(self.fail("netconststrings count"));
             }
             let names = self.bytes(count, 4, 4)?;
             for i in 0..count as usize {
-                if self.rd32(names + 4 * i) == INLINE {
+                if self.ptr(names + 4 * i) == INLINE {
                     self.string()?;
                 }
             }
@@ -1840,7 +1867,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 16, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         let (compressed, length) = (self.rd32(h + 4), self.rd32(h + 8));
@@ -1863,7 +1890,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 16, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         let (columns, rows) = (self.rd32(h + 4), self.rd32(h + 8));
@@ -1877,7 +1904,7 @@ impl<'a> Replay<'a> {
             let cells = self.bytes(count as u32, 8, 4)?;
             for i in 0..count as usize {
                 let at = self.pos;
-                let reference = self.rd32(cells + 8 * i);
+                let reference = self.ptr(cells + 8 * i);
                 if reference == INLINE {
                     self.string()?;
                 }
@@ -1896,7 +1923,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 24, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         if self.rd32(h + 20) != 0 {
@@ -1906,10 +1933,10 @@ impl<'a> Replay<'a> {
             }
             let columns = self.bytes(count, 32, 4)?;
             for i in 0..count as usize {
-                if self.rd32(columns + 32 * i) == INLINE {
+                if self.ptr(columns + 32 * i) == INLINE {
                     self.string()?;
                 }
-                if self.rd32(columns + 32 * i + 16) == INLINE {
+                if self.ptr(columns + 32 * i + 16) == INLINE {
                     self.string()?;
                 }
             }
@@ -1921,7 +1948,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 12, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         if self.rd32(h + 8) != 0 {
@@ -1952,7 +1979,7 @@ impl<'a> Replay<'a> {
                             let msize = if kind == 1 { 24 } else { 8 };
                             let members = self.bytes(m, msize, 4)?;
                             for k in 0..m as usize {
-                                if self.rd32(members + k * msize) == INLINE {
+                                if self.ptr(members + k * msize) == INLINE {
                                     self.string()?;
                                 }
                             }
@@ -1978,12 +2005,12 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 24, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         self.asset_reference(self.rd32(h + 12), Kind::Material)?;
         self.asset_reference(self.rd32(h + 16), Kind::Material)?;
-        if self.rd32(h + 20) == INLINE {
+        if self.ptr(h + 20) == INLINE {
             let n = self.rd32(h + 8);
             self.bytes(n, 24, 4)?;
         }

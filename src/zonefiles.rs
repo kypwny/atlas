@@ -222,8 +222,9 @@ pub fn build(dir: &Path, key: &ArchiveKey, out: &Path, signed: bool) -> Result<B
                 if expected && current.as_deref() != Some(t.as_str()) {
                     new = match (ty, nest) {
                         (MAP_ENTS | ADDON_MAP_ENTS, _) => with_entity_text(&blob, &t),
-                        // nested text keeps its length: pointers behind it are not all known to the relocation (a longer text
-                        // broke the dynamic entities' physics on the 3.19 server), so the edit has to fit the old size
+                        // nested text: it may change length, what lies behind it is relocated. `ATLAS_FIT_ENTS=1` keeps the old
+                        // length instead (padding, or dropping the white space between quoted strings), so that nothing moves
+                        (_, Some(p)) if std::env::var_os("ATLAS_FIT_ENTS").is_none() => Some(with_nested_text(&blob, p, &t)),
                         (_, Some(p)) => {
                             let fitted = fit_entities(&t, p.2 - 1).with_context(|| {
                                 format!("{}: the entity text is {} bytes too long to fit the zone even without white space ({} bytes available)", row[5], minify_entities(&t).len().saturating_sub(p.2 - 1), p.2 - 1)

@@ -8,7 +8,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 16, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         self.asset_reference(self.rd32(h + 4), Kind::Image)?;
@@ -19,7 +19,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 16, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         let count = self.rd32(h + 8);
@@ -30,7 +30,7 @@ impl<'a> Replay<'a> {
             let lights = self.bytes(count, 68, 4)?;
             for i in 0..count as usize {
                 let (l, at) = (lights + i * 68, self.pos);
-                let named = self.rd32(l + 64) == INLINE;
+                let named = self.ptr(l + 64) == INLINE;
                 if named {
                     self.string()?;
                 }
@@ -65,10 +65,10 @@ impl<'a> Replay<'a> {
         // 36-byte record has the map name's first characters at +36, which are never 0xffffffff
         // stock zones: the stage fields end a 44-byte header (a pointer that is 0 or -1 at +36); the `so_*` addon records are 36 bytes,
         // so what stands at +36 is the first characters of the name
-        let header = if self.stock && !matches!(self.rd32(h + 36), 0 | INLINE) { 36 } else if self.iw4_sizes() { 44 } else if self.rd32(h + 36) == INLINE { 52 } else { 36 };
+        let header = if self.stock && !matches!(self.rd32(h + 36), 0 | INLINE) { 36 } else if self.iw4_sizes() { 44 } else if self.ptr(h + 36) == INLINE { 52 } else { 36 };
         self.reserve(0, header, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         if self.rd32(h + 4) != 0 {
@@ -88,7 +88,7 @@ impl<'a> Replay<'a> {
             let n = self.rd8(h + 40);
             let stages = self.bytes(n, 20, 4)?;
             for i in 0..n as usize {
-                if self.rd32(stages + 20 * i) == INLINE {
+                if self.ptr(stages + 20 * i) == INLINE {
                     self.string()?;
                 }
             }
@@ -108,7 +108,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 52, 4, true)?;
         self.push(3)?;
-        if self.rd32(h + 48) == INLINE {
+        if self.ptr(h + 48) == INLINE {
             self.string()?;
         }
         if self.rd32(h) != 0 {
@@ -123,7 +123,7 @@ impl<'a> Replay<'a> {
         if depth >= 64 {
             return Err(self.fail("vehicle track nesting"));
         }
-        if self.rd32(r) == INLINE {
+        if self.ptr(r) == INLINE {
             self.string()?;
         }
         if self.rd32(r + 4) != 0 {
@@ -142,7 +142,7 @@ impl<'a> Replay<'a> {
                 let n = self.rd32(r + j + 4);
                 let refs = self.bytes(n, 4, 4)?;
                 for i in 0..n as usize {
-                    if self.rd32(refs + 4 * i) == INLINE {
+                    if self.ptr(refs + 4 * i) == INLINE {
                         let child = self.bytes(1, 44, 4)?;
                         self.vehicle_segment(child, depth + 1)?;
                     }
@@ -157,10 +157,10 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 84, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
-        if self.rd32(h + 72) == INLINE {
+        if self.ptr(h + 72) == INLINE {
             let n = self.rd32(h + 76);
             let records = self.bytes(n, 44, 4)?;
             for i in 0..n as usize {
@@ -178,7 +178,7 @@ impl<'a> Replay<'a> {
                 let names = self.bytes(n, 12, 4)?;
                 for i in 0..n as usize {
                     let r = names + 12 * i;
-                    if self.rd32(r) == INLINE {
+                    if self.ptr(r) == INLINE {
                         self.string()?;
                     }
                     if self.rd32(r + 8) != 0 {
@@ -200,7 +200,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 56, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         let count = self.rd32(h + 4);
@@ -239,7 +239,7 @@ impl<'a> Replay<'a> {
                 self.path_tree(trees + 16 * i, 0)?;
             }
         }
-        if self.rd32(h + 44) == INLINE {
+        if self.ptr(h + 44) == INLINE {
             let n = self.rd32(h + 48);
             let records = self.bytes(n, 44, 4)?;
             for i in 0..n as usize {
@@ -262,7 +262,7 @@ impl<'a> Replay<'a> {
             }
         } else {
             for k in 0..2 {
-                if self.rd32(t + 8 + 4 * k) == INLINE {
+                if self.ptr(t + 8 + 4 * k) == INLINE {
                     let child = self.bytes(1, 16, 4)?;
                     self.path_tree(child, depth + 1)?;
                 }
@@ -284,7 +284,7 @@ impl<'a> Replay<'a> {
                 let names = self.bytes(n, 12, 4)?;
                 for i in 0..n as usize {
                     let r = names + 12 * i;
-                    if self.rd32(r) == INLINE {
+                    if self.ptr(r) == INLINE {
                         self.string()?;
                     }
                     if self.rd32(r + 8) != 0 {
@@ -303,7 +303,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 8, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         if self.rd32(h + 4) != 0 {
@@ -317,7 +317,7 @@ impl<'a> Replay<'a> {
                 let names = self.bytes(n, 12, 4)?;
                 for i in 0..n as usize {
                     let r = names + 12 * i;
-                    if self.rd32(r) == INLINE {
+                    if self.ptr(r) == INLINE {
                         self.string()?;
                     }
                     if self.rd32(r + 8) != 0 {
@@ -334,7 +334,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 116, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         let g = h + 4;
@@ -400,7 +400,7 @@ impl<'a> Replay<'a> {
         }
         // IW4's statement is 24 bytes (an execution time and the last result follow the data pointer)
         self.reserve(3, if self.stock { 24 } else { 20 }, 4, true)?;
-        if self.stock && self.rd32(h + 8) == INLINE {
+        if self.stock && self.ptr(h + 8) == INLINE {
             self.menu_supporting_data()?;
         }
         if self.rd32(h + 4) != 0 {
@@ -411,7 +411,7 @@ impl<'a> Replay<'a> {
             let entries = self.bytes(count, 12, 4)?;
             for i in 0..count as usize {
                 let r = entries + 12 * i;
-                if self.rd32(r) == 0 || self.rd32(r + 8) != INLINE {
+                if self.rd32(r) == 0 || self.ptr(r + 8) != INLINE {
                     continue;
                 }
                 if self.rd32(r + 4) == 2 {
@@ -446,7 +446,7 @@ impl<'a> Replay<'a> {
             let event = self.bytes(1, 8, 4)?;
             let ty = self.rd8(event + 4);
             if ty == 0 {
-                if self.rd32(event) == INLINE {
+                if self.ptr(event) == INLINE {
                     self.string()?;
                 }
             } else if self.rd32(event) != 0 {
@@ -454,10 +454,10 @@ impl<'a> Replay<'a> {
                     self.menu_events(depth + 1)?;
                 } else if ty == 1 || (3..=6).contains(&ty) {
                     let payload = self.bytes(1, 8, 4)?;
-                    if ty != 1 && self.rd32(payload) == INLINE {
+                    if ty != 1 && self.ptr(payload) == INLINE {
                         self.string()?;
                     }
-                    if self.rd32(payload + 4) == INLINE {
+                    if self.ptr(payload + 4) == INLINE {
                         self.menu_expression(depth + 1)?;
                     }
                     if ty == 1 && self.rd32(payload) != 0 {
@@ -483,10 +483,10 @@ impl<'a> Replay<'a> {
     }
 
     fn menu_window(&mut self, h: usize) -> Res {
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
-        if self.rd32(h + 44) == INLINE {
+        if self.ptr(h + 44) == INLINE {
             self.string()?;
         }
         self.asset_reference(self.rd32(h + 160), Kind::Material)?;
@@ -501,13 +501,13 @@ impl<'a> Replay<'a> {
         let start = self.bytes(1, if self.qa() { 392 } else { 380 }, 4)?;
         self.menu_window(start)?;
         let h = start + d;
-        if self.rd32(h + 0xe4) == INLINE {
+        if self.ptr(h + 0xe4) == INLINE {
             self.string()?;
         }
         if self.stock {
             // IW4: two strings (mouse enter and exit text) come before the five event sets
             for i in [0xf0usize, 0xf4] {
-                if self.rd32(h + i) == INLINE {
+                if self.ptr(h + i) == INLINE {
                     self.string()?;
                 }
             }
@@ -518,7 +518,7 @@ impl<'a> Replay<'a> {
             }
         }
         for i in (0x110..=0x114).step_by(4) {
-            if self.rd32(h + i) == INLINE {
+            if self.ptr(h + i) == INLINE {
                 self.string()?;
             }
         }
@@ -526,7 +526,7 @@ impl<'a> Replay<'a> {
             self.menu_keys()?;
         }
         for i in (0x11c..=0x120).step_by(4) {
-            if self.rd32(h + i) == INLINE {
+            if self.ptr(h + i) == INLINE {
                 self.string()?;
             }
         }
@@ -547,13 +547,13 @@ impl<'a> Replay<'a> {
                 12 => {
                     let payload = self.bytes(1, 392, 4)?;
                     for i in 0..64 {
-                        if self.rd32(payload + 4 * i) == INLINE {
+                        if self.ptr(payload + 4 * i) == INLINE {
                             self.string()?;
                         }
                     }
                 }
                 13 => {
-                    if self.rd32(h + 0x134) == INLINE {
+                    if self.ptr(h + 0x134) == INLINE {
                         self.string()?;
                     }
                 }
@@ -573,14 +573,14 @@ impl<'a> Replay<'a> {
             }
             let expressions = self.bytes(count, 8, 4)?;
             for i in 0..count as usize {
-                if self.rd32(expressions + 8 * i + 4) == INLINE {
+                if self.ptr(expressions + 8 * i + 4) == INLINE {
                     self.menu_expression(0)?;
                 }
             }
         }
         let last = if self.qa() { 0x158 } else { 0x150 };
         for i in (0x144..=last).step_by(4) {
-            if self.rd32(h + i) == INLINE {
+            if self.ptr(h + i) == INLINE {
                 self.menu_expression(0)?;
             }
         }
@@ -591,41 +591,41 @@ impl<'a> Replay<'a> {
     /// strings the menu's expressions refer to).
     fn menu_supporting_data(&mut self) -> Res {
         let s = self.bytes(1, 24, 4)?;
-        if self.rd32(s + 4) == INLINE {
+        if self.ptr(s + 4) == INLINE {
             let n = self.rd32(s);
             if n > i32::MAX as u32 {
                 return Err(self.fail("menu function count"));
             }
             let list = self.bytes(n, 4, 4)?;
             for i in 0..n as usize {
-                if self.rd32(list + 4 * i) == INLINE {
+                if self.ptr(list + 4 * i) == INLINE {
                     self.menu_expression(0)?;
                 }
             }
         }
-        if self.rd32(s + 12) == INLINE {
+        if self.ptr(s + 12) == INLINE {
             let n = self.rd32(s + 8);
             if n > i32::MAX as u32 {
                 return Err(self.fail("menu static dvar count"));
             }
             let list = self.bytes(n, 4, 4)?;
             for i in 0..n as usize {
-                if self.rd32(list + 4 * i) == INLINE {
+                if self.ptr(list + 4 * i) == INLINE {
                     let dvar = self.bytes(1, 8, 4)?;
-                    if self.rd32(dvar + 4) == INLINE {
+                    if self.ptr(dvar + 4) == INLINE {
                         self.string()?;
                     }
                 }
             }
         }
-        if self.rd32(s + 20) == INLINE {
+        if self.ptr(s + 20) == INLINE {
             let n = self.rd32(s + 16);
             if n > i32::MAX as u32 {
                 return Err(self.fail("menu string count"));
             }
             let list = self.bytes(n, 4, 4)?;
             for i in 0..n as usize {
-                if self.rd32(list + 4 * i) == INLINE {
+                if self.ptr(list + 4 * i) == INLINE {
                     self.string()?;
                 }
             }
@@ -639,11 +639,11 @@ impl<'a> Replay<'a> {
         let start = self.pos;
         self.reserve(0, 400, 4, true)?;
         self.push(3)?;
-        if self.rd32(start + 396) == INLINE {
+        if self.ptr(start + 396) == INLINE {
             self.menu_supporting_data()?;
         }
         self.menu_window(start)?;
-        if self.rd32(start + 164) == INLINE {
+        if self.ptr(start + 164) == INLINE {
             self.string()?;
         }
         for o in [204usize, 212, 208, 216] {
@@ -654,16 +654,16 @@ impl<'a> Replay<'a> {
         if self.rd32(start + 220) != 0 {
             self.menu_keys()?;
         }
-        if self.rd32(start + 224) == INLINE {
+        if self.ptr(start + 224) == INLINE {
             self.menu_expression(0)?;
         }
         for i in [228usize, 232, 236] {
-            if self.rd32(start + i) == INLINE {
+            if self.ptr(start + i) == INLINE {
                 self.string()?;
             }
         }
         for i in (256..=276).step_by(4) {
-            if self.rd32(start + i) == INLINE {
+            if self.ptr(start + i) == INLINE {
                 self.menu_expression(0)?;
             }
         }
@@ -692,7 +692,7 @@ impl<'a> Replay<'a> {
         self.push(3)?;
         self.menu_window(start)?;
         let h = start + if self.qa() { 4 } else { 0 };
-        if self.rd32(h + 0xa4) == INLINE {
+        if self.ptr(h + 0xa4) == INLINE {
             self.string()?;
         }
         for o in EVENTS {
@@ -703,16 +703,16 @@ impl<'a> Replay<'a> {
         if self.rd32(h + 0xe0) != 0 {
             self.menu_keys()?;
         }
-        if self.rd32(h + 0xe4) == INLINE {
+        if self.ptr(h + 0xe4) == INLINE {
             self.menu_expression(0)?;
         }
         for i in [0xe8usize, 0xec] {
-            if self.rd32(h + i) == INLINE {
+            if self.ptr(h + i) == INLINE {
                 self.string()?;
             }
         }
         for i in (0x104..=0x118).step_by(4) {
-            if self.rd32(h + i) == INLINE {
+            if self.ptr(h + i) == INLINE {
                 self.menu_expression(0)?;
             }
         }
@@ -735,7 +735,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 12, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         if self.rd32(h + 8) != 0 {

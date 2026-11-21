@@ -29,7 +29,7 @@ impl<'a> Replay<'a> {
         self.push(3)?;
         let name_at = self.pos;
         for i in [0usize, 4] {
-            if self.rd32(h + i) == INLINE {
+            if self.ptr(h + i) == INLINE {
                 self.string()?;
             }
         }
@@ -52,7 +52,7 @@ impl<'a> Replay<'a> {
                 self.asset_reference(self.rd32(sky + 8), Kind::Image)?;
             }
         }
-        if self.rd32(h + 56) == INLINE {
+        if self.ptr(h + 56) == INLINE {
             let n = self.rd32(h + 8);
             self.bytes(n, 20, 4)?;
         }
@@ -85,7 +85,7 @@ impl<'a> Replay<'a> {
                     let nodes = self.bytes(n, 44, 4)?;
                     for j in 0..n as usize {
                         let node = nodes + j * 44;
-                        if self.rd32(node + 36) == INLINE {
+                        if self.ptr(node + 36) == INLINE {
                             let m = self.rd16(node + 34);
                             self.bytes(m, 2, 2)?;
                         }
@@ -471,6 +471,7 @@ impl<'a> Replay<'a> {
 
     fn qa_plane(&mut self, pointer: u32) -> Res {
         if pointer != INLINE {
+            self.note_pointer(pointer);
             return Ok(());
         }
         self.bytes(1, 20, 4)?;
@@ -482,17 +483,17 @@ impl<'a> Replay<'a> {
             let (tag, header) = (self.clip_tag, self.clip_header);
             self.rec.clips.push(super::replay::ClipRec { tag, header, ..Default::default() });
         }
-        if self.rd32(c + 4) == INLINE {
+        if self.ptr(c + 4) == INLINE {
             let n = self.rd32(c);
             let at = self.bytes(n, 20, 4)?;
             self.clip_note(|k| k.planes = (at, n as usize));
         }
-        if self.rd32(c + 12) == INLINE {
+        if self.ptr(c + 12) == INLINE {
             let n = self.rd32(c + 8);
             let records = self.bytes(n, 12, 4)?;
             self.clip_note(|k| k.materials = (records, n as usize));
             for i in 0..n as usize {
-                let named = self.rd32(records + 12 * i) == INLINE;
+                let named = self.ptr(records + 12 * i) == INLINE;
                 let name = if named { Some(self.pos) } else { None };
                 if named {
                     self.string()?;
@@ -505,7 +506,7 @@ impl<'a> Replay<'a> {
                 }
             }
         }
-        if self.rd32(c + 20) == INLINE {
+        if self.ptr(c + 20) == INLINE {
             let n = self.rd32(c + 16);
             let records = self.bytes(n, 8, 4)?;
             self.clip_note(|k| k.sides = (records, n as usize));
@@ -516,11 +517,11 @@ impl<'a> Replay<'a> {
                 }
             }
         }
-        if self.rd32(c + 28) == INLINE {
+        if self.ptr(c + 28) == INLINE {
             let n = self.rd32(c + 24);
             self.bytes(n, 1, 1)?;
         }
-        if self.rd32(c + 36) == INLINE {
+        if self.ptr(c + 36) == INLINE {
             let n = self.rd32(c + 32);
             let records = self.bytes(n, 20, 4)?;
             self.clip_note(|k| {
@@ -530,40 +531,40 @@ impl<'a> Replay<'a> {
             for i in 0..n as usize {
                 let r = records + 20 * i;
                 let leaves = self.rd16(r + 2) as u16 as i16;
-                if leaves > 0 && self.rd32(r + 8) == INLINE {
+                if leaves > 0 && self.ptr(r + 8) == INLINE {
                     let at = self.bytes(leaves as u32, 2, 2)?;
                     self.clip_note(|k| k.lb_inline[i] = at);
                 }
             }
         }
-        if self.rd32(c + 44) == INLINE {
+        if self.ptr(c + 44) == INLINE {
             let n = self.rd32(c + 40);
             let at = self.bytes(n, 2, 2)?;
             self.clip_note(|k| k.leaf_brushes = (at, n as usize));
         }
         let count = self.rd16(c + 48);
-        if self.rd32(c + 52) == INLINE {
+        if self.ptr(c + 52) == INLINE {
             let records = self.bytes(count, 36, 128)?;
             self.clip_note(|k| k.brushes = (records, count as usize));
             for i in 0..count as usize {
                 let r = records + 36 * i;
-                if self.rd32(r + 4) == INLINE {
+                if self.ptr(r + 4) == INLINE {
                     let side = self.bytes(1, 8, 4)?;
                     let p = self.rd32(side);
                     if p != 0 {
                         self.qa_plane(p)?;
                     }
                 }
-                if self.rd32(r + 8) == INLINE {
+                if self.ptr(r + 8) == INLINE {
                     self.bytes(1, 1, 1)?;
                 }
             }
         }
-        if self.rd32(c + 56) == INLINE {
+        if self.ptr(c + 56) == INLINE {
             let at = self.bytes(count, 24, 128)?;
             self.clip_note(|k| k.bounds = at);
         }
-        if self.rd32(c + 60) == INLINE {
+        if self.ptr(c + 60) == INLINE {
             let at = self.bytes(count, 4, 4)?;
             self.clip_note(|k| k.contents = at);
         }
@@ -580,6 +581,7 @@ impl<'a> Replay<'a> {
     }
 
     fn qa_clip_info_pointer(&mut self, pointer: u32) -> Res {
+        self.note_pointer(pointer);
         self.push(0)?;
         if pointer == INSERT {
             self.reserve(3, 4, 4, false)?;
@@ -600,129 +602,129 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 256, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
-        if self.rd32(h + 12) == INLINE {
+        if self.ptr(h + 12) == INLINE {
             let n = self.rd32(h + 8);
             self.bytes(n, 20, 4)?;
         }
-        if self.rd32(h + 20) == INLINE {
+        if self.ptr(h + 20) == INLINE {
             let n = self.rd32(h + 16);
             let records = self.bytes(n, 76, 4)?;
             for i in 0..n as usize {
                 self.asset_reference(self.rd32(records + 76 * i), Kind::Model)?;
             }
         }
-        if self.rd32(h + 28) == INLINE {
+        if self.ptr(h + 28) == INLINE {
             let n = self.rd32(h + 24);
             let records = self.bytes(n, 12, 4)?;
             for i in 0..n as usize {
-                if self.rd32(records + 12 * i) == INLINE {
+                if self.ptr(records + 12 * i) == INLINE {
                     self.string()?;
                 }
             }
         }
-        if self.rd32(h + 36) == INLINE {
+        if self.ptr(h + 36) == INLINE {
             let n = self.rd32(h + 32);
             let records = self.bytes(n, 8, 4)?;
             for i in 0..n as usize {
                 self.qa_plane(self.rd32(records + 8 * i))?;
             }
         }
-        if self.rd32(h + 44) == INLINE {
+        if self.ptr(h + 44) == INLINE {
             let n = self.rd32(h + 40);
             self.bytes(n, 1, 1)?;
         }
-        if self.rd32(h + 52) == INLINE {
+        if self.ptr(h + 52) == INLINE {
             let n = self.rd32(h + 48);
             let records = self.bytes(n, 8, 4)?;
             for i in 0..n as usize {
                 self.qa_plane(self.rd32(records + 8 * i))?;
             }
         }
-        if self.rd32(h + 60) == INLINE {
+        if self.ptr(h + 60) == INLINE {
             let n = self.rd32(h + 56);
             self.bytes(n, 40, 4)?;
         }
-        if self.rd32(h + 76) == INLINE {
+        if self.ptr(h + 76) == INLINE {
             let n = self.rd32(h + 72);
             self.bytes(n, 2, 2)?;
         }
-        if self.rd32(h + 68) == INLINE {
+        if self.ptr(h + 68) == INLINE {
             let n = self.rd32(h + 64);
             let records = self.bytes(n, 20, 4)?;
             for i in 0..n as usize {
                 let count = self.rd16(records + 20 * i + 2) as u16 as i16;
-                if count > 0 && self.rd32(records + 20 * i + 8) == INLINE {
+                if count > 0 && self.ptr(records + 20 * i + 8) == INLINE {
                     self.bytes(count as u32, 2, 2)?;
                 }
             }
         }
-        if self.rd32(h + 84) == INLINE {
+        if self.ptr(h + 84) == INLINE {
             let n = self.rd32(h + 80);
             self.bytes(n, 4, 4)?;
         }
-        if self.rd32(h + 92) == INLINE {
+        if self.ptr(h + 92) == INLINE {
             let n = self.rd32(h + 88);
             self.bytes(n, 12, 4)?;
         }
         let triangles = self.rd32(h + 96);
-        if self.rd32(h + 100) == INLINE {
+        if self.ptr(h + 100) == INLINE {
             self.bytes(triangles, 6, 2)?;
         }
-        if self.rd32(h + 104) == INLINE {
+        if self.ptr(h + 104) == INLINE {
             let n = ((3u32.wrapping_mul(triangles).wrapping_add(31)) >> 5).wrapping_mul(4);
             self.bytes(n, 1, 1)?;
         }
-        if self.rd32(h + 112) == INLINE {
+        if self.ptr(h + 112) == INLINE {
             let n = self.rd32(h + 108);
             self.bytes(n, 28, 4)?;
         }
-        if self.rd32(h + 120) == INLINE {
+        if self.ptr(h + 120) == INLINE {
             let n = self.rd32(h + 116);
             let records = self.bytes(n, 12, 4)?;
             for i in 0..n as usize {
-                if self.rd32(records + 12 * i + 8) == INLINE {
+                if self.ptr(records + 12 * i + 8) == INLINE {
                     self.bytes(1, 28, 4)?;
                 }
             }
         }
-        if self.rd32(h + 128) == INLINE {
+        if self.ptr(h + 128) == INLINE {
             let n = self.rd32(h + 124);
             self.bytes(n, 32, 16)?;
         }
-        if self.rd32(h + 136) == INLINE {
+        if self.ptr(h + 136) == INLINE {
             let n = self.rd32(h + 132);
             self.bytes(n, 68, 4)?;
         }
         let brushes = self.rd16(h + 140);
-        if self.rd32(h + 144) == INLINE {
+        if self.ptr(h + 144) == INLINE {
             let records = self.bytes(brushes, 36, 4)?;
             for i in 0..brushes as usize {
                 let r = records + 36 * i;
-                if self.rd32(r + 4) == INLINE {
+                if self.ptr(r + 4) == INLINE {
                     let side = self.bytes(1, 8, 4)?;
                     self.qa_plane(self.rd32(side))?;
                 }
-                if self.rd32(r + 8) == INLINE {
+                if self.ptr(r + 8) == INLINE {
                     self.bytes(1, 1, 1)?;
                 }
             }
         }
-        if self.rd32(h + 148) == INLINE {
+        if self.ptr(h + 148) == INLINE {
             self.bytes(brushes, 24, 4)?;
         }
-        if self.rd32(h + 152) == INLINE {
+        if self.ptr(h + 152) == INLINE {
             self.bytes(brushes, 4, 4)?;
         }
-        if self.rd32(h + 164) == INLINE {
+        if self.ptr(h + 164) == INLINE {
             let n = self.rd16(h + 160);
             self.bytes(n, 28, 4)?;
         }
         self.asset_reference(self.rd32(h + 156), Kind::AddonMapEnts)?;
         for i in 0..2usize {
-            if self.rd32(h + 172 + 4 * i) == INLINE {
+            if self.ptr(h + 172 + 4 * i) == INLINE {
                 let count = self.rd16(h + 168 + 2 * i);
                 // 92 bytes in the retail zones (ZoneTool's struct leaves out a trailing pointer)
                 let records = self.bytes(count, 92, 4)?;
@@ -747,7 +749,7 @@ impl<'a> Replay<'a> {
         let h = self.pos;
         self.reserve(0, 256, 4, true)?;
         self.push(3)?;
-        if self.rd32(h) == INLINE {
+        if self.ptr(h) == INLINE {
             self.string()?;
         }
         self.clip_on = true;
@@ -797,7 +799,7 @@ impl<'a> Replay<'a> {
             let n = self.rd32(h + 128);
             let records = self.bytes(n, 12, 4)?;
             for i in 0..n as usize {
-                if self.rd32(records + 12 * i + 8) == INLINE {
+                if self.ptr(records + 12 * i + 8) == INLINE {
                     self.bytes(1, 28, 4)?;
                 }
             }
@@ -827,14 +829,14 @@ impl<'a> Replay<'a> {
             let n = self.rd8(h + 160);
             let records = self.bytes(n, 20, 4)?;
             for i in 0..n as usize {
-                if self.rd32(records + 20 * i) == INLINE {
+                if self.ptr(records + 20 * i) == INLINE {
                     self.string()?;
                 }
             }
         }
         const STRIDES: [usize; 3] = [8, 32, 20];
         for i in 0..3 {
-            if self.rd32(h + 168 + 8 * i) == INLINE {
+            if self.ptr(h + 168 + 8 * i) == INLINE {
                 let n = self.rd32(h + 164 + 8 * i);
                 self.bytes(n, STRIDES[i], 4)?;
             }
