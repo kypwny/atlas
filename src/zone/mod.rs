@@ -26,6 +26,7 @@ pub mod export_map;
 pub mod mapsrc;
 pub mod mapscene;
 pub mod mapwrite;
+pub mod colltree;
 pub mod replay;
 pub mod stock;
 pub mod t6;

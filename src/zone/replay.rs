@@ -226,6 +226,8 @@ pub struct Recorder {
     pub cmodels: (usize, usize),
     /// (offset, count) of the collision map's 76-byte static model records (xmodel, origin, inverse scaled axis, absolute bounds).
     pub clip_statics: (usize, usize),
+    /// (offset, count) of the collision map's 40-byte `cLeaf_t` records; `leafBrushNode` (at +36) roots a leaf-brush tree.
+    pub clip_leafs: (usize, usize),
     /// With `Replay::record_addresses(true)`: (block address, stream offset, length) of every array the walk read, in order.
     pub addrs: Vec<(u32, usize, usize)>,
     /// The map's lights: the Com world's primary lights and the GfxWorld's hero lights.

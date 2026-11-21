@@ -785,7 +785,10 @@ impl<'a> Replay<'a> {
         }
         if self.rd32(h + 96) != 0 {
             let n = self.rd32(h + 92);
-            self.bytes(n, 40, 4)?;
+            let at = self.bytes(n, 40, 4)?;
+            if self.apply {
+                self.rec.clip_leafs = (at, n as usize);
+            }
         }
         if self.rd32(h + 104) != 0 {
             let n = self.rd32(h + 100);

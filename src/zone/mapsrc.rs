@@ -83,16 +83,16 @@ fn u16_at(d: &[u8], o: usize) -> u16 {
 }
 
 /// Address -> stream offset, for pointer words that lead to earlier arrays.
-struct Resolver {
+pub(crate) struct Resolver {
     spans: Vec<(u32, usize, usize)>,
 }
 
 impl Resolver {
-    fn new(mut spans: Vec<(u32, usize, usize)>) -> Resolver {
+    pub(crate) fn new(mut spans: Vec<(u32, usize, usize)>) -> Resolver {
         spans.sort_by_key(|s| s.0);
         Resolver { spans }
     }
-    fn offset(&self, ptr: u32) -> Option<usize> {
+    pub(crate) fn offset(&self, ptr: u32) -> Option<usize> {
         let i = self.spans.partition_point(|s| s.0 <= ptr);
         let (address, off, len) = *self.spans.get(i.checked_sub(1)?)?;
         let delta = (ptr - address) as usize;
