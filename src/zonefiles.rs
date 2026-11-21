@@ -131,7 +131,7 @@ pub fn fit_entities(text: &str, len: usize) -> Option<String> {
 }
 
 /// Replaces the text nested at (`hdr`, `at`, `n`) of a blob and fixes the length in the nested header.
-fn with_nested_text(blob: &[u8], (hdr, at, n): (usize, usize, usize), text: &str) -> Vec<u8> {
+pub(crate) fn with_nested_text(blob: &[u8], (hdr, at, n): (usize, usize, usize), text: &str) -> Vec<u8> {
     let mut bytes = text.as_bytes().to_vec();
     while bytes.last() == Some(&0) {
         bytes.pop();

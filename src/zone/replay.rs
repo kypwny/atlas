@@ -166,6 +166,8 @@ pub struct WorldRec {
     pub surfaces: Vec<(usize, Option<String>)>,
     /// The static models placed in the map: (offset of the 76-byte record in the image, model name).
     pub static_models: Vec<(usize, Option<String>)>,
+    /// Offset of the 36-byte per-model records that follow the draw records (bounds first: mins, maxs), one per static model.
+    pub static_insts: usize,
 }
 
 /// Where the arrays of a QA / 3.19 collision map's first `ClipInfo` sit in the zone image, as the walk met them. Offsets are stream
@@ -222,6 +224,8 @@ pub struct Recorder {
     pub map_ents: Vec<(usize, usize, usize)>,
     /// (offset, count) of the 72-byte `cmodel_t` records of the collision map (model 0 is the world, `*N` entities use model N).
     pub cmodels: (usize, usize),
+    /// (offset, count) of the collision map's 76-byte static model records (xmodel, origin, inverse scaled axis, absolute bounds).
+    pub clip_statics: (usize, usize),
     /// With `Replay::record_addresses(true)`: (block address, stream offset, length) of every array the walk read, in order.
     pub addrs: Vec<(u32, usize, usize)>,
     /// The map's lights: the Com world's primary lights and the GfxWorld's hero lights.

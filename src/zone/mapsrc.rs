@@ -29,6 +29,9 @@ pub struct StaticModel {
     pub origin: [f64; 3],
     /// Rows of the placement: forward, left, up (unit vectors).
     pub axis: [[f64; 3]; 3],
+    /// Pitch, yaw, roll as the `.map` shows them: from the axis when read from a zone, as typed when read from a `.map`. An
+    /// axis that is not a plain rotation (mirrored, stretched) has no exact angles; comparing the angles tells whether the user turned it.
+    pub angles: [f64; 3],
     pub scale: f64,
 }
 
@@ -43,8 +46,22 @@ impl Entity {
     }
 }
 
+/// Where a map's editable data sits in the zone image (stream offsets), kept so that edits can be written back in place.
+#[derive(Debug, Clone, Default)]
+pub struct Layout {
+    /// Offset of the 76-byte draw record and index (in the zone's static model list) of each entry of `MapSource::models`.
+    pub draw: Vec<(usize, usize)>,
+    /// Offset of the 36-byte per-model records (bounds), indexed like the zone's static model list.
+    pub insts: usize,
+    /// Offset and count of the collision map's 76-byte static model records.
+    pub clip_statics: (usize, usize),
+    /// Header offset, text offset and length (with the NUL) of the entity string; zero length when there is none.
+    pub entity_text: (usize, usize, usize),
+}
+
 #[derive(Debug, Default)]
 pub struct MapSource {
+    pub layout: Layout,
     pub name: String,
     pub entities: Vec<Entity>,
     /// The map's own brushes (entity 0, worldspawn).
@@ -183,6 +200,130 @@ fn tree_brushes(zone: &Zone, c: &ClipRec, r: &Resolver, start: usize) -> Vec<usi
     out
 }
 
+/// The three points of a plane line, then the material: `( x y z ) ( x y z ) ( x y z ) material ...`.
+fn parse_plane_line(line: &str) -> Option<Side> {
+    let mut nums = Vec::new();
+    let mut rest = line;
+    for _ in 0..3 {
+        let open = rest.find('(')?;
+        let close = rest.find(')')?;
+        let t: Vec<f64> = rest[open + 1..close].split_whitespace().map(|x| x.parse().ok()).collect::<Option<_>>()?;
+        if t.len() != 3 {
+            return None;
+        }
+        nums.push([t[0], t[1], t[2]]);
+        rest = &rest[close + 1..];
+    }
+    let material = rest.split_whitespace().next()?.to_string();
+    // Radiant reads the points as: the outward normal is (p0 - p1) x (p2 - p1)
+    let n = norm(cross(sub3(nums[0], nums[1]), sub3(nums[2], nums[1])));
+    let dist = n[0] * nums[1][0] + n[1] * nums[1][1] + n[2] * nums[1][2];
+    Some(Side { normal: n, dist, material })
+}
+
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+/// The two quoted strings of a key line.
+fn parse_key_line(line: &str) -> Option<(String, String)> {
+    let mut parts = line.split('"');
+    parts.next()?;
+    let key = parts.next()?.to_string();
+    parts.next()?;
+    let value = parts.next()?.to_string();
+    Some((key, value))
+}
+
+/// Reads a `.map` as [`to_map`] writes it (and as Radiant saves it): entities with their keys and brushes. Entity 0 is the world;
+/// an entity with `"model" "*N"` owns the brushes of brush model N; a `misc_model` that carries `"atlas_static"` is static model
+/// number N (its `origin`, `angles` and `modelscale` are the placement) and is not an entity of the game's entity text.
+pub fn parse_map(text: &str) -> Result<MapSource> {
+    let mut out = MapSource::default();
+    let mut depth = 0usize;
+    let mut cur: Option<Entity> = None;
+    let mut brush: Vec<Side> = Vec::new();
+    let mut brushes: Vec<Brush> = Vec::new();
+    let mut statics: Vec<(usize, StaticModel)> = Vec::new();
+    let mut world_done = false;
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        match line {
+            "{" => {
+                depth += 1;
+                match depth {
+                    1 => {
+                        cur = Some(Entity::default());
+                        brushes.clear();
+                    }
+                    2 => brush.clear(),
+                    _ => bail!("line {}: braces nested too deep", n + 1),
+                }
+            }
+            "}" => {
+                match depth {
+                    2 => {
+                        let contents = 1;
+                        brushes.push(Brush { sides: std::mem::take(&mut brush), contents });
+                    }
+                    1 => {
+                        let e = cur.take().ok_or_else(|| anyhow::anyhow!("line {}: stray }}", n + 1))?;
+                        if !world_done {
+                            world_done = true;
+                            out.world = std::mem::take(&mut brushes);
+                            out.entities.push(e);
+                        } else if let Some(idx) = e.get("atlas_static").and_then(|v| v.parse::<usize>().ok()) {
+                            let f = |k: &str, d: f64| e.get(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(d);
+                            let triple = |k: &str| -> [f64; 3] {
+                                let mut it = e.get(k).unwrap_or("0 0 0").split_whitespace().map(|t| t.parse::<f64>().unwrap_or(0.0));
+                                [it.next().unwrap_or(0.0), it.next().unwrap_or(0.0), it.next().unwrap_or(0.0)]
+                            };
+                            let angles = triple("angles");
+                            statics.push((idx, StaticModel { name: e.get("model").unwrap_or("").to_string(), origin: triple("origin"), axis: angles_to_axis(&angles), angles, scale: f("modelscale", 1.0) }));
+                        } else {
+                            if let Some(i) = e.get("model").and_then(|v| v.strip_prefix('*')).and_then(|v| v.parse::<u32>().ok()) {
+                                if !brushes.is_empty() {
+                                    out.submodels.push((i, std::mem::take(&mut brushes)));
+                                }
+                            }
+                            out.entities.push(e);
+                        }
+                    }
+                    _ => bail!("line {}: stray }}", n + 1),
+                }
+                depth -= 1;
+            }
+            _ if depth == 1 && line.starts_with('"') => {
+                let (k, v) = parse_key_line(line).ok_or_else(|| anyhow::anyhow!("line {}: bad key line", n + 1))?;
+                if let Some(e) = cur.as_mut() {
+                    e.keys.push((k, v));
+                }
+            }
+            _ if depth == 2 && line.starts_with('(') => {
+                brush.push(parse_plane_line(line).ok_or_else(|| anyhow::anyhow!("line {}: bad plane line", n + 1))?);
+            }
+            _ if depth == 2 && (line.starts_with("patchDef") || line.starts_with("curve") || line.starts_with("mesh")) => {
+                bail!("line {}: patches are not supported", n + 1);
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        bail!("the map ends inside a block");
+    }
+    statics.sort_by_key(|(i, _)| *i);
+    for (want, (got, _)) in statics.iter().enumerate() {
+        if *got != want {
+            bail!("static model {want} is missing from the map (deleting static models is not supported yet)");
+        }
+    }
+    out.models = statics.into_iter().map(|(_, m)| m).collect();
+    Ok(out)
+}
+
 /// Parses the entity text of a map: `{ "key" "value" ... }` blocks.
 pub fn parse_entities(text: &str) -> Vec<Entity> {
     let mut ents = Vec::new();
@@ -256,27 +397,27 @@ pub fn read(zone: &Zone, name: &str) -> Result<MapSource> {
 
     if let Some(w) = r.rec.world.as_ref() {
         let d = &zone.data;
-        for (at, model) in &w.static_models {
+        out.layout.insts = w.static_insts;
+        for (index, (at, model)) in w.static_models.iter().enumerate() {
             let Some(model) = model else { continue };
+            out.layout.draw.push((*at, index));
             let f = |i: usize| f32_at(d, at + 4 * i);
-            out.models.push(StaticModel {
-                name: model.clone(),
-                origin: [f(0), f(1), f(2)],
-                axis: [[f(3), f(4), f(5)], [f(6), f(7), f(8)], [f(9), f(10), f(11)]],
-                scale: f(12),
-            });
+            let axis = [[f(3), f(4), f(5)], [f(6), f(7), f(8)], [f(9), f(10), f(11)]];
+            out.models.push(StaticModel { name: model.clone(), origin: [f(0), f(1), f(2)], axis, angles: axis_to_angles(&axis), scale: f(12) });
         }
     }
 
     let d = &zone.data;
     let mut best: Option<String> = None;
-    for &(_, at, n) in &r.rec.map_ents {
+    out.layout.clip_statics = r.rec.clip_statics;
+    for &(hdr, at, n) in &r.rec.map_ents {
         if n == 0 || at + n > d.len() {
             continue;
         }
         let text = String::from_utf8_lossy(&d[at..at + n - 1]).into_owned();
         if best.as_ref().map_or(true, |b| text.len() > b.len()) && text.contains("\"classname\"") {
             best = Some(text);
+            out.layout.entity_text = (hdr, at, n);
         }
     }
     if let Some(t) = best {
@@ -413,6 +554,8 @@ pub fn to_map(m: &MapSource) -> String {
     for sm in &m.models {
         let _ = writeln!(out, "// entity {entity_no}");
         out.push_str("{\n\"classname\" \"misc_model\"\n");
+        // the index ties the entity to its static model when the map is read back (`parse_map`); the game never sees the key
+        let _ = writeln!(out, "\"atlas_static\" \"{}\"", entity_no - m.entities.len());
         let _ = writeln!(out, "\"model\" \"{}\"", sm.name);
         let _ = writeln!(out, "\"origin\" \"{} {} {}\"", num(sm.origin[0]), num(sm.origin[1]), num(sm.origin[2]));
         let a = axis_to_angles(&sm.axis);

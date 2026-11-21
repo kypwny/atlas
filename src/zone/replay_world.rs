@@ -360,7 +360,12 @@ impl<'a> Replay<'a> {
             self.bytes(sorted as u32, 2, 2)?;
         }
         if self.rd32(p + 80) != 0 {
-            self.bytes(models, 36, 4)?;
+            let at = self.bytes(models, 36, 4)?;
+            if self.apply {
+                if let Some(w) = self.rec.world.as_mut() {
+                    w.static_insts = at;
+                }
+            }
         }
         if self.rd32(p + 84) != 0 {
             let records = self.bytes(surfaces, 24, 4)?;
@@ -761,6 +766,9 @@ impl<'a> Replay<'a> {
         if self.rd32(h + 80) != 0 {
             let n = self.rd32(h + 76);
             let records = self.bytes(n, 76, 4)?;
+            if self.apply {
+                self.rec.clip_statics = (records, n as usize);
+            }
             for i in 0..n as usize {
                 self.asset_reference(self.rd32(records + 76 * i), Kind::Model)?;
             }
