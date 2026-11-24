@@ -36,13 +36,20 @@ pub struct MapEntsStash {
 }
 
 thread_local! {
+    /// The GfxWorld's plane array of the zone being converted: (asset id, stream offset, bytes).
+    static WORLD_PLANES: RefCell<Option<(u32, usize, Vec<u8>)>> = RefCell::new(None);
     static MAP_ENTS: RefCell<HashMap<u32, MapEntsStash>> = RefCell::new(HashMap::new());
     static CONSUMED: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
 }
 
 pub fn reset() {
+    WORLD_PLANES.with(|w| *w.borrow_mut() = None);
     MAP_ENTS.with(|m| m.borrow_mut().clear());
     CONSUMED.with(|m| m.borrow_mut().clear());
+}
+
+pub fn world_planes(id: u32, at: usize, bytes: Vec<u8>) {
+    WORLD_PLANES.with(|w| *w.borrow_mut() = Some((id, at, bytes)));
 }
 
 pub fn stash_map_ents(id: u32, st: MapEntsStash) {
@@ -78,6 +85,8 @@ struct Ctx<'a, 'b, 'c> {
     /// words to point at array elements once the arrays' positions are known: (word offset, array, byte offset in the array)
     pending: Vec<(usize, usize, u32)>,
     arrays: Vec<Arr>,
+    /// (asset id, stream offset) of the world's plane array when the collision map's planes are the same bytes: the map then aliases it
+    shared_planes: Option<(u32, usize)>,
 }
 
 const PLANES: usize = 0;
@@ -97,12 +106,41 @@ fn read(s: &Src, ptr: u32, count: usize, stride: usize, what: &str) -> Result<Ve
     Ok(a)
 }
 
+/// IW3's last leaf-brush node can name the box-hull brush, index `numBrushes`, that the engine adds at run time; the QA loader's reader
+/// refuses an index past the brushes, and nothing in the file refers to that node, so trailing nodes like that are left out.
+fn trim_lbn(s: &Src, lbn: usize, brushes: usize) -> usize {
+    let mut n = lbn;
+    if lbn == 0 || !s.has(68) {
+        return lbn;
+    }
+    let base = s.u32(68);
+    while n > 0 {
+        let r = s.at(base + 20 * (n as u32 - 1));
+        let leaves = r.u16(2) as i16;
+        let p = r.u32(8);
+        let out_of_range = leaves > 0 && p != 0 && s.v.bytes(p, 2 * leaves as usize).is_some_and(|b| b.chunks(2).any(|c| u16::from_le_bytes([c[0], c[1]]) as usize >= brushes));
+        if !out_of_range {
+            break;
+        }
+        n -= 1;
+    }
+    n
+}
+
 fn clip_map(s: &Src, o: &mut Out) -> Result<(), String> {
     let n = |off: u32| s.u32(off) as usize;
     let (planes, materials, sides, edges, lbn, lb) = (n(8), n(24), n(32), n(40), n(64), n(72));
     let brushes = s.u16(140) as usize;
+    let lbn = trim_lbn(s, lbn, brushes);
     let (statics, nodes, leafs, verts, tris, borders, parts, trees, cmodels) = (n(16), n(48), n(56), n(88), n(96), n(108), n(116), n(124), n(132));
-    let mut cx = Ctx { s, pending: Vec::new(), arrays: vec![Arr::default(); 5] };
+    let mut cx = Ctx { s, pending: Vec::new(), arrays: vec![Arr::default(); 5], shared_planes: None };
+    if planes > 0 && s.has(12) {
+        if let Some((id, at, bytes)) = WORLD_PLANES.with(|w| w.borrow().clone()) {
+            if read(s, 12, planes, 20, "collision planes").map(|p| p == bytes).unwrap_or(false) {
+                cx.shared_planes = Some((id, at));
+            }
+        }
+    }
     cx.arrays[PLANES] = Arr { base: s.u32(12), len: (planes * 20) as u32, stream: None };
     cx.arrays[SIDES] = Arr { base: s.u32(36), len: (sides * 8) as u32, stream: None };
     cx.arrays[EDGES] = Arr { base: s.u32(44), len: edges as u32, stream: None };
@@ -179,7 +217,9 @@ fn clip_map(s: &Src, o: &mut Out) -> Result<(), String> {
     let mut starts: [Option<usize>; 9] = [None; 9];
 
     // ---- the ClipInfo at +8, in the order the loader reads it
-    if planes > 0 && s.has(12) {
+    if let Some((id, wat)) = cx.shared_planes {
+        o.outer(at + 12, id, wat);
+    } else if planes > 0 && s.has(12) {
         let st = o.put(&read(s, 12, planes, 20, "collision planes")?);
         cx.arrays[PLANES].stream = Some(st);
         starts[0] = Some(st);
@@ -316,7 +356,17 @@ fn clip_map(s: &Src, o: &mut Out) -> Result<(), String> {
         let _ = order;
     }
     if brushes > 0 && s.has(148) {
-        starts[7] = Some(o.put(&read(s, 148, brushes, 24, "brush bounds")?));
+        let mut bounds = read(s, 148, brushes, 24, "brush bounds")?;
+        // a half size is never negative (a box that is a hair inside out from rounding, e.g. -4.4e-8, would be refused by the loader)
+        for b in 0..brushes {
+            for k in 0..3 {
+                let at = 24 * b + 12 + 4 * k;
+                if f32::from_le_bytes(bounds[at..at + 4].try_into().unwrap()) < 0.0 {
+                    bounds[at..at + 4].copy_from_slice(&0f32.to_le_bytes());
+                }
+            }
+        }
+        starts[7] = Some(o.put(&bounds));
     }
     if brushes > 0 && s.has(152) {
         starts[8] = Some(o.put(&read(s, 152, brushes, 4, "brush contents")?));
@@ -337,6 +387,9 @@ fn clip_map(s: &Src, o: &mut Out) -> Result<(), String> {
         if let Some(t) = start {
             o.inner(pat + word, *t);
         }
+    }
+    if let Some((id, wat)) = cx.shared_planes {
+        o.outer(pat + 4, id, wat);
     }
 
     // ---- static models
@@ -457,6 +510,10 @@ fn clip_map(s: &Src, o: &mut Out) -> Result<(), String> {
     }
     // resolve the aliases into the arrays
     for (w, array, byte) in std::mem::take(&mut cx.pending) {
+        if let (PLANES, Some((id, wat))) = (array, cx.shared_planes) {
+            o.outer(w, id, wat + byte as usize);
+            continue;
+        }
         let Some(base) = cx.arrays[array].stream else { return Err("alias into an array that was not written".into()) };
         o.inner(w, base + byte as usize);
     }

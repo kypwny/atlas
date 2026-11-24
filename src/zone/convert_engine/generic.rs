@@ -603,7 +603,7 @@ impl Conv {
         self.dummy
     }
 
-    fn copy_raw(&mut self, saddr: u32, taddr: u32, n: usize) {
+    pub fn copy_raw(&mut self, saddr: u32, taddr: u32, n: usize) {
         if let Some(b) = self.s_bytes(saddr, n) {
             let b = b.to_vec();
             if self.heap.fits(taddr, n) {
@@ -911,7 +911,7 @@ impl Conv {
     }
 
     /// The heap address standing for the source address of an asset-pointer slot (the asset converted on demand).
-    fn asset_at_slot(&mut self, slot: u32) -> u32 {
+    pub fn asset_at_slot(&mut self, slot: u32) -> u32 {
         let Some(&id) = self.w().ref_id.get(&slot) else {
             self.warn("a reference to an asset that was not found".to_string());
             self.nulled += 1;

@@ -123,6 +123,28 @@ fn technique_set(s: &Src, o: &mut Out) -> Result<(), String> {
     Ok(())
 }
 
+/// IW4 code constant -> QA 3.3.3.3. QA inserts constants of its own (ssaoParms, renderSourceSize, scanlines, glow colours ...)
+/// between IW4's, and its matrices start at 247: QA = 249 + 4 * group + slot from IW4's view matrix (0x4C) on, with the
+/// transpose bit flipped (QA's world shader, the same byte code as CoD4's, reads `viewProjectionMatrix` from 257 where IW4
+/// names TRANSPOSE_VIEW_PROJECTION_MATRIX). Read from the constant tables of QA's own shaders against their arguments
+/// (mp_crash_tropical, code_post_gfx_mp; 2026-11-23). Unconverted, the world's matrices were read as empty vectors and
+/// nothing was drawn.
+fn qa_code_const(i: u16) -> u16 {
+    match i {
+        0..=7 => i,
+        8..=0x16 => i + 1,
+        0x17..=0x2B => i + 2,
+        0x2C..=0x2D => i + 3,
+        0x2E..=0x35 => i + 10,
+        0x36..=0x39 => i + 11,
+        0x3A..=0x4B => i + 139,
+        _ => {
+            let (g, slot) = ((i - 0x4C) / 4, (i - 0x4C) % 4);
+            249 + 4 * g + [2, 3, 0, 1][slot as usize]
+        }
+    }
+}
+
 /// A technique: {name, flags, passCount} then `passCount` passes of 20 bytes {vertex declaration, vertex shader, pixel shader,
 /// three argument counts, custom sampler flags, arguments}; QA is the same. Literal constants (argument types 1 and 7) are
 /// stored behind their arguments.
@@ -166,6 +188,10 @@ fn technique(t: &Src, o: &mut Out) -> Result<(), String> {
         let mut literals: Vec<Vec<u8>> = Vec::new();
         for k in 0..n {
             let ty = u16::from_le_bytes([args[8 * k], args[8 * k + 1]]);
+            if ty == 3 || ty == 5 {
+                let idx = u16::from_le_bytes([args[8 * k + 4], args[8 * k + 5]]);
+                out[8 * k + 4..8 * k + 6].copy_from_slice(&qa_code_const(idx).to_le_bytes());
+            }
             if ty == 1 || ty == 7 {
                 let lp = p.at(base + 8 * k as u32).u32(4);
                 let lit = t.v.bytes(lp, 16).ok_or("literal constant outside the loaded memory")?;

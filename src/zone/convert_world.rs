@@ -146,7 +146,10 @@ fn gfx_world(s: &Src, o: &mut Out) -> Result<(), String> {
     }
     // dpvs planes, node plane indices
     if nz(56) {
-        o.put(&need(s, 56, planes, 20, "dpvs planes")?);
+        let bytes = need(s, 56, planes, 20, "dpvs planes")?;
+        let at = o.put(&bytes);
+        // the collision map's planes are these (the QA loader reads that array once and the map aliases it)
+        super::convert_clip::world_planes(o.f.id, at, bytes);
     }
     if nz(60) {
         o.put(&need(s, 60, nodes, 2, "dpvs nodes")?);

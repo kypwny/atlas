@@ -1208,16 +1208,35 @@ fn dumpshaders(args: &[String]) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut seen = std::collections::HashSet::new();
     let mut written = 0;
+    let mut written_all = 0usize;
     for f in &args[2..] {
         let z = zone::Zone::open(&PathBuf::from(f), &key)?;
         let mut replay = zone::replay::Replay::new(&z).map_err(|e| anyhow::anyhow!("{} at {:#x}", e.what, e.at))?;
         for i in 0..z.assets.len() {
             let _ = replay.replay_asset(&z, i);
         }
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(PathBuf::from(dir).join("passes.txt"))?;
+            let base = written_all;
+            for (vs, ps, raw) in &replay.rec.pass_args {
+                let h: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+                writeln!(f, "{} {} {}", vs.map(|i| (base + i).to_string()).unwrap_or("-".into()), ps.map(|i| (base + i).to_string()).unwrap_or("-".into()), h)?;
+            }
+            for (i, (_, bytes)) in replay.rec.shaders.iter().enumerate() {
+                std::fs::write(PathBuf::from(dir).join(format!("#{}.bin", base + i)), bytes)?;
+            }
+            written_all += replay.rec.shaders.len();
+        }
         for (name, bytes) in &replay.rec.shaders {
             let name = name.clone().unwrap_or_else(|| "unnamed".into()).replace([',', '/', '\\', ':', '*', '?'], "_");
             if seen.insert((name.clone(), bytes.len())) {
-                std::fs::write(PathBuf::from(dir).join(format!("{name}.bin")), bytes)?;
+                // a vertex and a pixel shader may share a name: the second keeps its size in the file name
+                let mut path = PathBuf::from(dir).join(format!("{name}.bin"));
+                if path.exists() {
+                    path = PathBuf::from(dir).join(format!("{name}_{}.bin", bytes.len()));
+                }
+                std::fs::write(path, bytes)?;
                 written += 1;
             }
         }

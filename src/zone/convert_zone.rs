@@ -49,6 +49,9 @@ pub struct Frag {
     pub refs: Vec<(usize, u32)>,
     /// (offset of the word, offset in this asset's stream of the data it points at): a reference inside the asset.
     pub inner: Vec<(usize, usize)>,
+    /// (offset of the word, id of another asset, offset in that asset's stream): a reference to data inside another asset (the QA
+    /// collision map's planes are the world's).
+    pub outer: Vec<(usize, u32, usize)>,
     /// (id, offset of the data in this asset's stream): assets stored inside this one (with a pointer slot of their own) that
     /// later references may name by `id`.
     pub anchors: Vec<(u32, usize)>,
@@ -101,6 +104,11 @@ impl Out {
     pub fn inner(&mut self, at: usize, target: usize) {
         self.set(at, PLACEHOLDER);
         self.f.inner.push((at, target));
+    }
+    /// Makes the word at `at` point at the data that starts at stream offset `target` of the asset `id` (written earlier).
+    pub fn outer(&mut self, at: usize, id: u32, target: usize) {
+        self.set(at, PLACEHOLDER);
+        self.f.outer.push((at, id, target));
     }
 }
 
@@ -339,6 +347,29 @@ pub fn convert_frags(stock: &ZoneImage) -> Result<(Vec<Frag>, BTreeMap<u32, Type
     }
     // map entities that the collision map holds inline are not assets of their own
     frags.retain(|f| !(f.ty == 19 && super::convert_clip::consumed(f.id)));
+    // A map needs an effect world (type 20, the glass system): the QA client has no default for the type and ends with
+    // WIN_LOAD_ASSET_ERROR without one. A map that brings none (Call of Duty 4 has no such asset; the stock one has no rule) gets an
+    // empty one: no glass definitions, room for one piece, every run-time array present (as IW4x makes for its CoD4 maps).
+    if !frags.iter().any(|f| f.ty == 20) {
+        if let Some(at) = frags.iter().position(|f| f.ty == 21) {
+            let name = frags.iter().find(|f| f.ty == 16).map(|f| f.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| frags[at].name.clone());
+            let mut h = Hdr::new(116);
+            h.u32(0, INLINE);
+            h.u32(4 + 12, 1); // pieceLimit
+            h.u32(4 + 16, 1); // pieceWordCount
+            h.u32(4 + 24, 1); // cellCount
+            h.u32(4 + 32, 0xffff); // firstFreePiece
+            h.u32(4 + 36, 1); // geoDataLimit
+            for i in 0..9 {
+                h.u32(4 + 52 + 4 * i, INLINE);
+            }
+            let mut out = Out::new(20, 0xfff0_0020);
+            out.put(&h.0);
+            out.put_str(name.as_bytes());
+            out.f.name = name;
+            frags.insert(at, out.f);
+        }
+    }
     Ok((frags, stats))
 }
 
@@ -451,7 +482,23 @@ fn assemble(stock: &ZoneImage, mut frags: Vec<Frag>, stats: BTreeMap<u32, TypeSt
         let mut spans: Vec<(usize, usize, u32)> = allocs.iter().zip(info).filter(|((_, _, l), (_, read))| *read && *l > 0).map(|(&(_, a, l), &(at, _))| (at, l, a)).collect();
         spans.sort_by_key(|s| s.0);
         let mut start = zone.table_offset + 16 * zone.assets.len();
+        let mut frag_start: HashMap<u32, usize> = HashMap::new();
         for f in &frags {
+            frag_start.insert(f.id, start);
+            start += f.bytes.len();
+        }
+        let mut start = zone.table_offset + 16 * zone.assets.len();
+        for f in &frags {
+            for &(at, id, target) in &f.outer {
+                let Some(&base) = frag_start.get(&id) else { bail!("{}: reference into asset {id}, which was not converted", f.name) };
+                let t = base + target;
+                let k = spans.partition_point(|s| s.0 <= t);
+                let Some(&(s, l, a)) = k.checked_sub(1).map(|k| &spans[k]) else { bail!("{}: outer reference to {t:#x} has no allocation", f.name) };
+                if t - s >= l.max(1) {
+                    bail!("{}: outer reference to {t:#x} is outside the allocation at {s:#x}", f.name);
+                }
+                patches.push((start + at, a + (t - s) as u32));
+            }
             for &(at, id) in &f.refs {
                 patches.push((start + at, slot_of[&id]));
             }

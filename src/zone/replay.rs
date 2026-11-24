@@ -272,6 +272,8 @@ pub struct Recorder {
     pub techsets: HashMap<usize, Option<String>>,
     /// Shader programs seen inline: (name, bytecode), vertex and pixel shaders alike.
     pub shaders: Vec<(Option<String>, Vec<u8>)>,
+    /// Per pass whose shaders are inline: (index in `shaders` of the vertex shader, of the pixel shader, the raw 8-byte arguments).
+    pub pass_args: Vec<(Option<usize>, Option<usize>, Vec<u8>)>,
     pub materials: Vec<MatRec>,
     pub material_by_start: HashMap<usize, usize>,
     /// Image offset of a model's header -> its name (stock models are not recorded in `models`).
@@ -963,11 +965,18 @@ impl<'a> Replay<'a> {
                 for j in 0..count as usize {
                     let pass = passes + 20 * j;
                     self.shader_reference(self.rd32(pass), true)?;
+                    let n0 = self.rec.shaders.len();
                     self.shader_reference(self.rd32(pass + 4), false)?;
+                    let n1 = self.rec.shaders.len();
                     self.shader_reference(self.rd32(pass + 8), false)?;
+                    let n2 = self.rec.shaders.len();
                     if self.rd32(pass + 16) != 0 {
                         let n = self.rd8(pass + 12) + self.rd8(pass + 13) + self.rd8(pass + 14);
                         let args = self.bytes(n, 8, 4)?;
+                        if self.apply {
+                            let raw = self.src[args..args + 8 * n as usize].to_vec();
+                            self.rec.pass_args.push(((n1 > n0).then_some(n0), (n2 > n1).then_some(n1), raw));
+                        }
                         for k in 0..n as usize {
                             let t = self.rd16(args + 8 * k);
                             if (t == 1 || t == 7) && self.ptr(args + 8 * k + 4) == INLINE {

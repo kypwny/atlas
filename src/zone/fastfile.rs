@@ -176,6 +176,9 @@ pub fn open(path: &Path, key: &ArchiveKey) -> Result<Opened> {
     open_bytes(&raw, key).with_context(|| path.display().to_string())
 }
 
+/// Body bytes the client decrypts in an unsigned file: its first 0x40000-byte read chunk minus the header.
+const UNSIGNED_ENCRYPTED: usize = 0x40000 - HEADER;
+
 pub fn open_bytes(raw: &[u8], key: &ArchiveKey) -> Result<Opened> {
     if raw.len() < HEADER {
         bail!("too short for a fastfile");
@@ -202,7 +205,17 @@ pub fn open_bytes(raw: &[u8], key: &ArchiveKey) -> Result<Opened> {
     let mut signed_header = None;
 
     let compressed = if unsigned {
-        ctr(&cipher, iv, body)
+        // either the whole body is one CTR stream, or (the client's unsigned path) only the first read chunk is
+        let whole = ctr(&cipher, iv, body);
+        let mut probe = ZlibDecoder::new(&whole[..]);
+        if probe.read_to_end(&mut Vec::new()).is_ok() {
+            whole
+        } else {
+            let n = UNSIGNED_ENCRYPTED.min(body.len());
+            let mut v = ctr(&cipher, iv, &body[..n]);
+            v.extend_from_slice(&body[n..]);
+            v
+        }
     } else {
         if body.len() % BLOCK != 0 || body.len() < 3 * BLOCK {
             bail!("signed body is not whole blocks");
@@ -264,7 +277,10 @@ pub fn seal(image: &[u8], version: u32, c: &Container) -> Result<Vec<u8>> {
     out.extend_from_slice(&c.key_blob);
     debug_assert_eq!(out.len(), HEADER);
     if !c.signed {
-        out.extend(ctr(&cipher, iv, &compressed));
+        // the client's unsigned loader decrypts only the first 0x40000-byte read chunk, the rest is plain deflate
+        let n = UNSIGNED_ENCRYPTED.min(compressed.len());
+        out.extend(ctr(&cipher, iv, &compressed[..n]));
+        out.extend_from_slice(&compressed[n..]);
         return Ok(out);
     }
     let Some(template) = &c.signed_header else { bail!("a signed file needs the header block of the file it replaces") };

@@ -11,6 +11,7 @@ pub mod convert_fx;
 pub mod convert_from_codol;
 pub mod convert_gfx;
 pub mod convert_iw3;
+pub mod convert_iw3_world;
 pub mod convert_iw5;
 pub mod convert_model;
 pub mod convert_nx1;
