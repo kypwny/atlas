@@ -33,6 +33,11 @@ impl Fmt {
             "iw4" | "mw2" => Some(Fmt::Iw4),
             "iw5" | "mw3" => Some(Fmt::Iw5),
             "codol" | "qa" | "codo" => Some(Fmt::Codol),
+            // 3.19.26.22 (fastfile 461): the same format, the version is a setting of the CoDOL converter
+            "codol319" | "319" => {
+                super::convert_zone::set_target_version(super::fastfile::VERSION_319);
+                Some(Fmt::Codol)
+            }
             "nx1" => Some(Fmt::Nx1),
             _ => None,
         }
@@ -64,7 +69,7 @@ impl Fmt {
             Fmt::Iw3 => 5,
             Fmt::Iw4 => 276,
             Fmt::Iw5 => 1,
-            Fmt::Codol => fastfile::VERSION_QA,
+            Fmt::Codol => super::convert_zone::target_version(),
             Fmt::Nx1 => 357,
         }
     }
@@ -216,7 +221,7 @@ pub fn verify(fmt: Fmt, name: &str, image: &[u8]) -> Result<String> {
             Ok(format!("{} assets, exact ({} stream bytes, blocks {:?})", r.assets_walked, r.consumed, r.block_end))
         }
         None => {
-            let zone = Zone::from_image(fastfile::VERSION_QA, image.to_vec())?;
+            let zone = Zone::from_image(super::convert_zone::target_version(), image.to_vec())?;
             let mut r = super::replay::Replay::new(&zone).map_err(|f| anyhow::anyhow!("QA walker: zone prefix: {} at {}", f.what, f.at))?;
             r.enable_tracing();
             for i in 0..zone.assets.len() {
@@ -258,7 +263,7 @@ pub fn encode_fastfile(target: Fmt, folder: Option<&Path>, image: &[u8], signed:
             let key = super::export::find_key(root)?;
             let mut container = convert_zone::template_container(root, &key)?;
             container.signed = signed && container.signed;
-            let sealed = fastfile::seal(image, fastfile::VERSION_QA, &container)?;
+            let sealed = fastfile::seal(image, super::convert_zone::target_version(), &container)?;
             // the sealed file must open again to the same image
             let again = fastfile::open_bytes(&sealed, &key).context("reopening the sealed file")?;
             if again.image != image {

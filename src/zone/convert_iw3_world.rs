@@ -76,6 +76,64 @@ fn gfx_world_to_iw4(c: &mut Conv, s: S, t: T) -> R {
     if count > 0 && cells != 0 {
         let (Some(sk), Some(tk)) = (c.ssid("GfxAabbTree"), c.tsid("GfxAabbTree")) else { return Err("no GfxAabbTree".to_string()) };
         let (ssz, tsz) = (c.ssize(sk), c.tsize(tk));
+        if std::env::var_os("ATLAS_CHECK_TREES").is_some() {
+            // do the IW3 tree nodes bound the static models they list? (origins of GfxStaticModelDrawInst, placement first)
+            let dpvs = c.ssub(s, "dpvs");
+            let (insts, nsm) = dpvs.map(|d| (c.sp(d, "smodelDrawInsts"), c.si(d, "smodelCount").max(0) as u32)).unwrap_or((0, 0));
+            let ik = c.ssid("GfxStaticModelDrawInst");
+            let isz = ik.map(|k| c.ssize(k)).unwrap_or(0);
+            let (mut inside, mut outside) = (0u32, 0u32);
+            for i in 0..count as u32 {
+                let cell = cells + cell_size * i;
+                let n = i32_at(c, cell + 24).max(0) as u32;
+                let src = c.s_ptr(cell + 28);
+                for k in 0..n {
+                    let node = S { sid: sk, addr: src + k * ssz };
+                    let cnt = c.si(node, "smodelIndexCount").max(0) as u32;
+                    let list = c.sp(node, "smodelIndexes");
+                    let (mn, mx) = (c.s_at(node, "mins"), c.s_at(node, "maxs"));
+                    for q in 0..cnt {
+                        let v = c.s_bytes(list + 2 * q, 2).map(|b| u16::from_le_bytes([b[0], b[1]])).unwrap_or(0) as u32;
+                        let Some(ik) = ik else { continue };
+                        if v >= nsm || insts == 0 {
+                            continue;
+                        }
+                        let inst = S { sid: ik, addr: insts + v * isz };
+                        let o = c.ssub(inst, "placement").map(|p| c.s_at(p, "origin")).unwrap_or(inst.addr);
+                        let ok = (0..3u32).all(|a| {
+                            let (lo, hi, p) = (f32_at(c, mn + 4 * a), f32_at(c, mx + 4 * a), f32_at(c, o + 4 * a));
+                            p >= lo - 2.0 && p <= hi + 2.0
+                        });
+                        if ok { inside += 1 } else { outside += 1 }
+                    }
+                }
+            }
+            eprintln!("iw3 trees: node size {ssz}, smodel refs inside their node {inside}, outside {outside} ({nsm} smodels, inst size {isz})");
+            if let (Some(ik), Some(p)) = (ik, std::env::var_os("ATLAS_DUMP_SMODELS")) {
+                let mut txt = String::new();
+                for v in 0..nsm {
+                    let inst = S { sid: ik, addr: insts + v * isz };
+                    let o = c.ssub(inst, "placement").map(|p| c.s_at(p, "origin")).unwrap_or(inst.addr);
+                    txt += &format!("{} {} {}\n", f32_at(c, o), f32_at(c, o + 4), f32_at(c, o + 8));
+                }
+                let _ = std::fs::write(p, txt);
+            }
+            if let Some(ik) = ik {
+                for v in [0u32, 1, 2, 1000] {
+                    let inst = S { sid: ik, addr: insts + v * isz };
+                    let o = c.ssub(inst, "placement").map(|p| c.s_at(p, "origin")).unwrap_or(inst.addr);
+                    let f: Vec<f32> = (0..3u32).map(|a| f32_at(c, o + 4 * a)).collect();
+                    eprintln!("iw3 smodel {v}: origin {f:?} (origin at +{})", o - inst.addr);
+                }
+            }
+            let src0 = c.s_ptr(cells + 28);
+            for k in 0..3u32 {
+                let node = S { sid: sk, addr: src0 + k * ssz };
+                let (mn, mx) = (c.s_at(node, "mins"), c.s_at(node, "maxs"));
+                let f: Vec<f32> = (0..3u32).map(|a| f32_at(c, mn + 4 * a)).chain((0..3u32).map(|a| f32_at(c, mx + 4 * a))).collect();
+                eprintln!("iw3 cell 0 node {k}: mins/maxs {f:?} (mins at +{}, maxs at +{})", mn - node.addr, mx - node.addr);
+            }
+        }
         let counts = c.heap.alloc(4 * count, 4);
         let trees = c.heap.alloc(4 * count, 4);
         for i in 0..count as u32 {
@@ -87,6 +145,38 @@ fn gfx_world_to_iw4(c: &mut Conv, s: S, t: T) -> R {
                 let arr = c.heap.alloc((tsz * n) as usize, 4);
                 for k in 0..n {
                     c.generic(S { sid: sk, addr: src + k * ssz }, T { sid: tk, addr: arr + k * tsz })?;
+                }
+                // Static models: every reference of the cell goes into its root node. At load the IW4-line engines (3.19
+                // sub_C0E9C0) stable-sort the static models by their first material's sorted index and renumber the model
+                // lists of each cell's ROOT node only (and the primary lights' lists). Stock maps come presorted, so nothing
+                // moves; IW3 lists models at every tree level, and after the sort the deeper lists named other models, culled
+                // by the wrong node box (mp_citystreets: 18,453 of 25,784 references; props popped with view and distance).
+                // Each model is still culled by its own bounds and cull distance.
+                let mut all: Vec<u16> = Vec::new();
+                for k in 0..n {
+                    let node = S { sid: sk, addr: src + k * ssz };
+                    let cnt = c.si(node, "smodelIndexCount").max(0) as u32;
+                    let list = c.sp(node, "smodelIndexes");
+                    for q in 0..cnt {
+                        if let Some(b) = c.s_bytes(list + 2 * q, 2) {
+                            all.push(u16::from_le_bytes([b[0], b[1]]));
+                        }
+                    }
+                }
+                all.sort_unstable();
+                all.dedup();
+                for k in 0..n {
+                    let node = T { sid: tk, addr: arr + k * tsz };
+                    c.t_set_i(node, "smodelIndexCount", 0);
+                    c.t_set_ptr(node, "smodelIndexes", 0);
+                }
+                if !all.is_empty() {
+                    let bytes: Vec<u8> = all.iter().flat_map(|v| v.to_le_bytes()).collect();
+                    let a = c.heap.alloc(bytes.len(), 2);
+                    c.heap.put(a, &bytes);
+                    let root = T { sid: tk, addr: arr };
+                    c.t_set_i(root, "smodelIndexCount", all.len() as i64);
+                    c.t_set_ptr(root, "smodelIndexes", a);
                 }
                 c.heap.set_ptr(trees + 4 * i, arr);
             }
@@ -121,6 +211,24 @@ fn surface_indices_in_order(c: &mut Conv, t: T) {
     }
     let gsz = c.tsize(gk);
     let mut out: Vec<u8> = c.heap.get(old, 2 * old_count as usize).to_vec();
+    if std::env::var_os("ATLAS_CHECK_INDICES").is_some() {
+        let (mut rel_ok, mut abs_ok) = (0, 0);
+        for i in 0..n {
+            let e = surfs + i * gsz;
+            let (fv, nv, tri, base) = (c.heap.u32(e + 4), c.heap.u16(e + 8) as u32, c.heap.u16(e + 10) as u32, c.heap.u32(e + 12));
+            if base + 3 * tri > old_count || tri == 0 {
+                continue;
+            }
+            let v: Vec<u32> = out[2 * base as usize..2 * (base + 3 * tri) as usize].chunks(2).map(|b| u16::from_le_bytes([b[0], b[1]]) as u32).collect();
+            let (lo, hi) = (*v.iter().min().unwrap(), *v.iter().max().unwrap());
+            rel_ok += (hi < nv) as u32;
+            abs_ok += (lo >= fv && hi < fv + nv) as u32;
+            if i < 4 {
+                eprintln!("surface {i}: firstVertex {fv} vertexCount {nv} tris {tri} baseIndex {base} indices {lo}..{hi} gsz {gsz}");
+            }
+        }
+        eprintln!("indices: {n} surfaces, {rel_ok} valid relative to firstVertex, {abs_ok} valid as absolute; {old_count} indices, out {} bytes", out.len());
+    }
     for i in 0..n {
         let e = surfs + i * gsz;
         let tri = c.heap.u16(e + 10) as u32;
@@ -129,9 +237,14 @@ fn surface_indices_in_order(c: &mut Conv, t: T) {
             continue;
         }
         let at = (out.len() / 2) as u32;
-        let src = c.heap.get(old + 2 * base, 6 * tri as usize).to_vec();
+        // from the copy taken above, not another heap read: on a large map (mp_citystreets, 672,990 indices) the heap read at
+        // old + 2 * base returned other data and 7,578 of 10,012 surfaces drew stretched on 3.19
+        let src = out[2 * base as usize..2 * (base + 3 * tri) as usize].to_vec();
         out.extend_from_slice(&src);
         c.heap.set_u32(e + 12, at);
+    }
+    if let Some(p) = std::env::var_os("ATLAS_DUMP_INDICES") {
+        let _ = std::fs::write(p, &out);
     }
     let count = (out.len() / 2) as i64;
     let a = c.heap.alloc(out.len(), 16);

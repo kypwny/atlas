@@ -312,6 +312,14 @@ fn model(s: &Src, o: &mut Out) -> Result<(), String> {
     if roots > bones {
         return Err("more root bones than bones".into());
     }
+    if let Ok(filter) = std::env::var("ATLAS_MODEL_PROBE") {
+        let name = String::from_utf8_lossy(&s.cstr(0).unwrap_or_default()).into_owned();
+        if name.contains(&filter) {
+            let b = s.bytes(240, 4);
+            eprintln!("model probe {name}: numLods {} collLod {} flags {:#x} colSurf {} numColSurfs {} contents {:#x}",
+                b[1], b[2] as i8, b[3], if s.has(244) { "yes" } else { "null" }, s.u32(248), s.u32(252));
+        }
+    }
     let mut h = Hdr::new(360);
     h.u32(0, follows(s, 0));
     h.raw(4, &s.bytes(4, 8)); // numBones .. scale

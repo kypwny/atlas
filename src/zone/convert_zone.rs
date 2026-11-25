@@ -21,6 +21,24 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
+/// Fastfile version the IW4 -> Call of Duty Online conversion writes: QA 3.3.3.3 (423, the default) or 3.19 (461). 3.19 zones differ
+/// in three layouts only: the render world (a word at +52), the technique set (a 49th slot at 46) and the material (49 state-bits
+/// entries, the counts one byte later, the camera region a byte); everything else is QA's (read from both builds' stock zones).
+static TARGET_VERSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(fastfile::VERSION_QA);
+
+pub fn set_target_version(v: u32) {
+    TARGET_VERSION.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn target_version() -> u32 {
+    TARGET_VERSION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether the conversion writes 3.19 (461) layouts.
+pub fn target_319() -> bool {
+    target_version() == fastfile::VERSION_319
+}
+
 thread_local! {
     /// Name of the stock structure being converted and the problems met so far (message -> count).
     static CURRENT: RefCell<String> = RefCell::new(String::new());
@@ -285,6 +303,11 @@ pub struct Converted {
 pub type Rule = fn(&Src, &mut Out) -> std::result::Result<(), String>;
 
 fn rule_for(name: &str) -> Option<Rule> {
+    // 3.19's impact table has longer entries (156 bytes, QA 140) whose layout is not read yet: the asset is left out and the game
+    // falls back to its own table of the name
+    if target_319() && name == "FxImpactTable" {
+        return None;
+    }
     if let Some(r) = super::convert_basic::rule_for(name) {
         return Some(r);
     }
@@ -370,6 +393,38 @@ pub fn convert_frags(stock: &ZoneImage) -> Result<(Vec<Frag>, BTreeMap<u32, Type
             frags.insert(at, out.f);
         }
     }
+    // 3.19: the map's own net-const lists. A 3.19 client numbers models and effects only from NetConstStrings assets (type 44,
+    // {name, category, 3, count, strings}, strings sorted; stock maps carry `ncs_<cat>_level`, e.g. mp_nuked's ncs_mdl_level
+    // with its 51 entity and destructible models). Without them a CoD4 map's script models (cars, barrels, objectives) and
+    // effects have no number, so the server cannot name them to the client and they are not drawn. Category 0 = models,
+    // 3 = effects (layout at 0xDA9808: 1024 / 400 slots, the shared zones use about 350 / 220).
+    if target_319() && !frags.iter().any(|f| f.ty == 44) {
+        for (cat, ty, label) in [(0u32, 4u32, "mdl"), (3, 30, "vfx")] {
+            let mut names: Vec<String> =
+                frags.iter().filter(|f| f.ty == ty && !f.name.is_empty() && !f.name.starts_with(',')).map(|f| f.name.clone()).collect();
+            names.sort();
+            names.dedup();
+            if names.is_empty() {
+                continue;
+            }
+            let name = format!("ncs_{label}_level");
+            let mut h = Hdr::new(20);
+            h.u32(0, INLINE);
+            h.u32(4, cat);
+            h.u32(8, 3);
+            h.u32(12, names.len() as u32);
+            h.u32(16, INLINE);
+            let mut out = Out::new(44, 0xfff0_0440 + cat);
+            out.put(&h.0);
+            out.put_str(name.as_bytes());
+            out.put(&vec![0xffu8; 4 * names.len()]);
+            for n in &names {
+                out.put_str(n.as_bytes());
+            }
+            out.f.name = name;
+            frags.push(out.f);
+        }
+    }
     Ok((frags, stats))
 }
 
@@ -443,7 +498,7 @@ fn assemble(stock: &ZoneImage, mut frags: Vec<Frag>, stats: BTreeMap<u32, TypeSt
     // pass 1: roomy blocks, placeholder addresses
     let roomy = [0x0f00_0000u32; 8];
     let image = lay_out(&prefix, &roomy, &frags);
-    let mut zone = Zone::from_image(fastfile::VERSION_QA, image)?;
+    let mut zone = Zone::from_image(target_version(), image)?;
     let mut patches: Vec<(usize, u32)> = Vec::new();
     {
         let r = walk_all(&zone)?;
@@ -519,7 +574,7 @@ fn assemble(stock: &ZoneImage, mut frags: Vec<Frag>, stats: BTreeMap<u32, TypeSt
         data[at..at + 4].copy_from_slice(&v.to_le_bytes());
     }
     // pass 2: the block sizes are what the walk fills
-    let zone = Zone::from_image(fastfile::VERSION_QA, data)?;
+    let zone = Zone::from_image(target_version(), data)?;
     let peaks = walk_all(&zone)?.block_positions();
     let mut sizes = [0u32; 8];
     for (b, s) in sizes.iter_mut().enumerate() {
@@ -529,7 +584,7 @@ fn assemble(stock: &ZoneImage, mut frags: Vec<Frag>, stats: BTreeMap<u32, TypeSt
     for (i, s) in sizes.iter().enumerate() {
         data[8 + 4 * i..12 + 4 * i].copy_from_slice(&s.to_le_bytes());
     }
-    let done = Zone::from_image(fastfile::VERSION_QA, data)?;
+    let done = Zone::from_image(target_version(), data)?;
     let r = walk_all(&done)?;
     if r.block_positions() != peaks {
         bail!("the block footprint changed after the block sizes were written");
@@ -565,12 +620,12 @@ pub fn template_container(root: &Path, key: &ArchiveKey) -> Result<Container> {
     zones.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(u64::MAX));
     for p in zones {
         if let Ok(o) = fastfile::open(&p, key) {
-            if o.version == fastfile::VERSION_QA {
+            if o.version == target_version() {
                 return Ok(o.container);
             }
         }
     }
-    bail!("no QA 3.3.3.3 zone found in {} to take the container from", root.display())
+    bail!("no zone of fastfile version {} found in {} to take the container from", target_version(), root.display())
 }
 
 /// Compares the plain content (raw files, string tables, localised strings) of the converted zone, as the QA walker reads it,

@@ -87,6 +87,14 @@ fn gfx_world(s: &Src, o: &mut Out) -> Result<(), String> {
     q.raw(368, &insert_defaults());
     q.raw(1328, &s.bytes(348, 64)); // outdoor lookup matrix
     q.raw(1392, &s.bytes(412, 216)); // outdoor image .. fogTypesAllowed
+    // the world's sort keys (lit decal, effect decal, effect auto, distortion): QA numbers sort keys one higher than IW4 from 30 on,
+    // like the materials' (stock QA mp_crash_tropical: 6, 0x28, 0x31, 0x2c)
+    for off in [36usize, 40, 44, 48] {
+        let k = u32::from_le_bytes(q.0[off..off + 4].try_into().unwrap());
+        if k >= 30 {
+            q.u32(off, k + 1);
+        }
+    }
     // pointers: "data follows" where the stock word is set (asset references are patched below)
     for (stock, qa) in [(0u32, 0usize), (4, 4), (24, 24), (56, 56), (60, 60), (64, 64), (68, 68), (72, 72), (76, 76)] {
         q.u32(qa, if nz(stock) { INLINE } else { 0 });
@@ -120,6 +128,17 @@ fn gfx_world(s: &Src, o: &mut Out) -> Result<(), String> {
     }
     q.u32(620 + 980, if nz(620) { INLINE } else { 0 });
     // the cell count and the sort keys are plain values: already copied
+    // 3.19 (1,612 bytes): one more word at +52 behind the sort keys (0x35 in the stock 3.19 mp_crash_tropical, absent in QA's; the
+    // rest of the header is QA's four bytes later); header references below add `sh`
+    let sh = if super::convert_zone::target_319() {
+        let mut v = q.0[..52].to_vec();
+        v.extend_from_slice(&0x35u32.to_le_bytes());
+        v.extend_from_slice(&q.0[52..]);
+        q.0 = v;
+        4
+    } else {
+        0
+    };
     let at = o.put(&q.0);
 
     // ---- stream, in the order the QA loader reads it
@@ -247,8 +266,8 @@ fn gfx_world(s: &Src, o: &mut Out) -> Result<(), String> {
             }
         }
     }
-    o.reference(at + 124, s.asset(112));
-    o.reference(at + 128, s.asset(116));
+    o.reference(at + sh + 124, s.asset(112));
+    o.reference(at + sh + 128, s.asset(116));
     let (vc, lsz, ic) = (n(120), n(132), n(144));
     if nz(124) {
         o.put(&need(s, 124, vc, 44, "world vertices")?);
@@ -294,9 +313,9 @@ fn gfx_world(s: &Src, o: &mut Out) -> Result<(), String> {
         }
     }
     // sun flare materials (sprite, flare), outdoor image
-    o.reference(at + 268, s.asset(256));
-    o.reference(at + 272, s.asset(260));
-    o.reference(at + 1392, s.asset(412));
+    o.reference(at + sh + 268, s.asset(256));
+    o.reference(at + sh + 272, s.asset(260));
+    o.reference(at + sh + 1392, s.asset(412));
     // ---- shadow geometry (12 bytes per primary light), light regions (8 bytes per light with 80-byte hulls)
     if nz(448) {
         let a = need(s, 448, lights, 12, "shadow geometry")?;
@@ -359,6 +378,12 @@ fn gfx_world(s: &Src, o: &mut Out) -> Result<(), String> {
     }
     if nz(548) {
         let a = need(s, 548, models, 76, "static model draw instances")?;
+        if std::env::var_os("ATLAS_CHECK_TREES").is_some() {
+            for v in [0usize, 1, 2] {
+                let f: Vec<f32> = (0..3).map(|k| f32::from_le_bytes(a[76 * v + 4 * k..76 * v + 4 * k + 4].try_into().unwrap())).collect();
+                eprintln!("iw4 -> codol smodel {v}: origin {f:?}");
+            }
+        }
         let base = s.u32(548);
         let st = o.put(&a);
         for i in 0..models {

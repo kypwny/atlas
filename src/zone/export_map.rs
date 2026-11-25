@@ -248,13 +248,13 @@ pub fn prepare(src: &Path, game_folder: Option<&Path>, target: Fmt, signed: bool
     let input = convert_cli::open_input(src, game_folder)?;
     let mut route = vec![format!("{}: {} zone (version {}), {} bytes inflated", src.display(), input.fmt.name(), input.version, input.image.len())];
     let source_names = names_of_input(&input);
-    if input.fmt == target && (target != Fmt::Codol || input.version == super::fastfile::VERSION_QA) {
+    if input.fmt == target && (target != Fmt::Codol || input.version == super::convert_zone::target_version()) {
         let verified = convert_cli::verify(target, &input.name, &input.image).context("the source zone does not read cleanly")?;
         route.push(format!("already a {} zone: copied unchanged", target.name()));
         return Ok(Prepared { bytes: std::fs::read(src)?, route, verified, names: source_names });
     }
     if input.fmt == Fmt::Codol && target == Fmt::Codol {
-        bail!("no converter between Call of Duty Online builds (the zone is version {}, the target takes {})", input.version, super::fastfile::VERSION_QA);
+        bail!("no converter between Call of Duty Online builds (the zone is version {}, the target takes {})", input.version, super::convert_zone::target_version());
     }
     if target == Fmt::Codol && game_folder.is_none() {
         bail!("exporting to Call of Duty Online needs --game-folder (a QA 3.3.3.3 folder, read only, for the archive key and container)");
@@ -277,7 +277,7 @@ pub fn prepare(src: &Path, game_folder: Option<&Path>, target: Fmt, signed: bool
 pub fn prepare_const(map: &str, beside: &Path, game_folder: Option<&Path>, target: Fmt, signed: bool) -> Result<Prepared> {
     if beside.is_file() {
         let input = convert_cli::open_input(beside, game_folder)?;
-        if input.fmt == Fmt::Codol && input.version == super::fastfile::VERSION_QA {
+        if input.fmt == Fmt::Codol && input.version == super::convert_zone::target_version() {
             let files = super::const_zone::parse(&input.image).with_context(|| format!("{} is not a const zone", beside.display()))?;
             if let Err(e) = super::const_zone::check(map, &files, None) {
                 bail!("{}: not the const zone of {map}: {e}", beside.display());
@@ -355,16 +355,19 @@ struct Opts {
     force: bool,
     signed: bool,
     no_const: bool,
+    /// extra IWD archives or folders of them (`--iwd`, repeatable): images the zone names without pixels
+    iwds: Vec<PathBuf>,
 }
 
 fn usage() -> anyhow::Error {
-    anyhow::anyhow!("usage: atlas --exportmap SRC.ff --to iw3|iw4|iw5|codol OUT_DIR [--name MAP] [--signed] [--game-folder FOLDER] [--no-const] [--dry-run] [--force]")
+    anyhow::anyhow!("usage: atlas --exportmap SRC.ff --to iw3|iw4|iw5|codol OUT_DIR [--name MAP] [--signed] [--game-folder FOLDER] [--no-const] [--iwd FILE|FOLDER]... [--dry-run] [--force]")
 }
 
 fn parse(args: &[String]) -> Result<Opts> {
     let (mut name, mut to, mut game_folder) = (None, None, None);
     let (mut dry_run, mut force, mut signed, mut no_const) = (false, false, false, false);
     let mut positional = Vec::new();
+    let mut iwds = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -378,6 +381,10 @@ fn parse(args: &[String]) -> Result<Opts> {
                     _ => to = Some(Fmt::parse(val).with_context(|| format!("unknown game {val:?} (iw3, iw4, iw5 or codol)"))?),
                 }
             }
+            "--iwd" => {
+                i += 1;
+                iwds.push(PathBuf::from(args.get(i).context("--iwd needs a file or folder")?));
+            }
             "--dry-run" => dry_run = true,
             "--force" => force = true,
             "--signed" => signed = true,
@@ -388,7 +395,7 @@ fn parse(args: &[String]) -> Result<Opts> {
         i += 1;
     }
     let [src, out] = <[PathBuf; 2]>::try_from(positional).map_err(|_| usage())?;
-    Ok(Opts { src, out, to: to.ok_or_else(usage)?, name, game_folder, dry_run, force, signed, no_const })
+    Ok(Opts { src, out, to: to.ok_or_else(usage)?, name, game_folder, dry_run, force, signed, no_const, iwds })
 }
 
 fn join(root: &Path, rel: &str) -> PathBuf {
@@ -404,6 +411,16 @@ pub fn command(args: &[String]) -> Result<()> {
         bail!("{}: give the map zone itself; its _load zone is packaged from the file beside it", o.src.display());
     }
     println!("target: {}", t.game);
+    // the map's IWD: images the zones only name (the loading screen) are embedded, since Call of Duty Online reads no IWD
+    let iwd = o.src.with_file_name(format!("{stem}.iwd"));
+    if matches!(t.fmt, Fmt::Codol) {
+        for p in std::iter::once(iwd).filter(|p| p.is_file()).chain(o.iwds.iter().cloned()) {
+            let n = super::convert_gfx::add_iwd_images(&p).map_err(|e| anyhow::anyhow!(e))?;
+            println!("  {}: {n} image(s) available to embed", p.display());
+        }
+        super::convert_gfx::set_image_placeholders(super::convert_zone::target_319());
+        super::convert_gfx::set_loose_images(super::convert_zone::target_319());
+    }
     let main = prepare(&o.src, gf, t.fmt, o.signed)?;
     let (map, notes) = resolve_map(&stem, o.name.as_deref(), main.names.as_ref())?;
 
@@ -478,9 +495,24 @@ pub fn command(args: &[String]) -> Result<()> {
     if !existing.is_empty() && !o.force {
         bail!("already there: {}\nnothing written; --force overwrites them", existing.join(", "));
     }
+    // 3.19: the streamed textures, written as images\NAME.iwi beside the zones (usermaps\MAP\images\ in the game)
+    let images = super::convert_gfx::take_loose_images();
+    if !images.is_empty() {
+        let bytes: usize = images.iter().map(|(_, b)| b.len()).sum();
+        println!("  {} ({} loose image(s), {bytes} bytes; copy to usermaps\\{map}\\images)", o.out.join("images").display(), images.len());
+    }
     if o.dry_run {
         println!("--dry-run: nothing written");
         return Ok(());
+    }
+    if !images.is_empty() {
+        let dir = o.out.join("images");
+        std::fs::create_dir_all(&dir).with_context(|| dir.display().to_string())?;
+        for (name, b) in &images {
+            let path = dir.join(format!("{name}.iwi"));
+            std::fs::write(&path, b).with_context(|| path.display().to_string())?;
+        }
+        println!("wrote {} image(s) to {}", images.len(), dir.display());
     }
 
     let mut written = Vec::new();

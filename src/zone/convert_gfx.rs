@@ -20,6 +20,189 @@ pub fn rule_for(name: &str) -> Option<Rule> {
     })
 }
 
+/// Images of IWD archives, by asset name: the map's own `MAP.iwd` beside the source first, then any `--iwd` file or folder (the
+/// source game's stock archives, e.g. CoD4's `main\iw_*.iwd`). A CoD4 zone names streamed images with an empty load definition
+/// (the client reads `images/NAME.iwi` from its IWDs). QA tolerates a missing file; 3.19 stops with WIN_FILE_NOT_FOUND. An empty
+/// image whose name is here is written inline; the first archive that has a name wins. Entries are read when used.
+static IWD_IMAGES: std::sync::Mutex<Option<HashMap<String, (std::path::PathBuf, usize)>>> = std::sync::Mutex::new(None);
+/// 3.19 target: the streamed 2D images as loose `images/NAME.iwi` files ("IWi" version 9) instead of embedded pixels.
+/// One block of a zone holds at most 256 MB (a zone pointer keeps 28 bits of offset), which a stock CoD4 map's textures
+/// overflow (mp_citystreets: 278 MB). 3.19 reads an image whose load definition is empty from images/NAME.iwi
+/// (sub_C20270) through its search paths; r1-mod serves usermaps\MAP\images\ there. Cube maps stay embedded (an empty
+/// cube is made blank, sub_BE7470), and so does a file over the loader's 12 MB staging buffer (sub_C1F7D0, error 498).
+static LOOSE_IMAGES: std::sync::Mutex<Option<Vec<(String, Vec<u8>)>>> = std::sync::Mutex::new(None);
+
+/// Start (Some) or stop collecting loose images; `take_loose_images` hands over what was collected.
+pub fn set_loose_images(on: bool) {
+    *LOOSE_IMAGES.lock().unwrap() = on.then(Vec::new);
+}
+
+pub fn take_loose_images() -> Vec<(String, Vec<u8>)> {
+    LOOSE_IMAGES.lock().unwrap().as_mut().map(std::mem::take).unwrap_or_default()
+}
+
+/// CoD4 iwi v6 -> 3.19 iwi v9: header 28 -> 32 bytes (flags u32 at 4, format at 8, w/h/d at 10, the four
+/// file-size-for-picmip values at 16, each counting the larger header); the pixels (smallest level first) are unchanged.
+fn iwi6_to_iwi9(b: &[u8]) -> Option<Vec<u8>> {
+    if b.len() < 28 || &b[..3] != b"IWi" || b[3] != 6 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(b.len() + 4);
+    out.extend_from_slice(b"IWi\x09");
+    out.extend_from_slice(&(b[5] as u32).to_le_bytes());
+    out.push(b[4]);
+    out.push(0);
+    out.extend_from_slice(&b[6..12]);
+    for i in 0..4 {
+        let v = u32::from_le_bytes(b[12 + 4 * i..16 + 4 * i].try_into().unwrap());
+        out.extend_from_slice(&(v + 4).to_le_bytes());
+    }
+    out.extend_from_slice(&b[28..]);
+    // the loader requires size[0] == the file's length
+    (u32::from_le_bytes(out[16..20].try_into().unwrap()) as usize == out.len()).then_some(out)
+}
+
+/// 4x4 grey DXT1 as an iwi v9 file (one level, no picmip).
+fn placeholder_iwi9() -> Vec<u8> {
+    let mut out = b"IWi\x09".to_vec();
+    out.extend_from_slice(&0x03u32.to_le_bytes());
+    out.push(11);
+    out.push(0);
+    for v in [4u16, 4, 1] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for _ in 0..4 {
+        out.extend_from_slice(&40u32.to_le_bytes());
+    }
+    out.extend_from_slice(&[0x10, 0x84, 0x10, 0x84, 0, 0, 0, 0]);
+    out
+}
+
+fn iwd_raw(name: &str) -> Option<Vec<u8>> {
+    let (p, i) = IWD_IMAGES.lock().unwrap().as_ref()?.get(&name.to_ascii_lowercase())?.clone();
+    read_iwd_entry(&p, i)
+}
+
+/// Whether an empty 2D image found in no archive gets a 4x4 grey placeholder (3.19 target).
+static PLACEHOLDERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_image_placeholders(on: bool) {
+    PLACEHOLDERS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Registers every `images/*.iwi` of an IWD (zip), or of every `*.iwd` in a folder (in name order). Returns how many names were new.
+pub fn add_iwd_images(path: &std::path::Path) -> Result<usize, String> {
+    if path.is_dir() {
+        let mut files: Vec<_> = std::fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("iwd")))
+            .collect();
+        files.sort();
+        let mut n = 0;
+        for f in files {
+            n += add_iwd_images(&f)?;
+        }
+        return Ok(n);
+    }
+    let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut z = zip::ZipArchive::new(f).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut map = IWD_IMAGES.lock().unwrap();
+    let m = map.get_or_insert_with(HashMap::new);
+    let mut n = 0;
+    for i in 0..z.len() {
+        let e = z.by_index_raw(i).map_err(|e| e.to_string())?;
+        let name = e.name().map_err(|e| e.to_string())?.replace('\\', "/").to_ascii_lowercase();
+        let Some(stem) = name.strip_prefix("images/").and_then(|x| x.strip_suffix(".iwi")) else { continue };
+        if !m.contains_key(stem) {
+            m.insert(stem.to_string(), (path.to_path_buf(), i));
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+fn read_iwd_entry(path: &std::path::Path, i: usize) -> Option<Vec<u8>> {
+    let mut z = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
+    let mut e = z.by_index(i).ok()?;
+    let mut b = Vec::new();
+    std::io::Read::read_to_end(&mut e, &mut b).ok()?;
+    Some(b)
+}
+
+/// 4x4 DXT1, one level, mid grey: stands in for a texture none of the archives has.
+fn placeholder_load_def() -> (Vec<u8>, u32, u32, u32) {
+    let mut out = vec![1u8, 0, 0, 0];
+    out.extend_from_slice(&0x03u32.to_le_bytes());
+    out.extend_from_slice(&0x3154_5844u32.to_le_bytes());
+    out.extend_from_slice(&8u32.to_le_bytes());
+    out.extend_from_slice(&[0x10, 0x84, 0x10, 0x84, 0, 0, 0, 0]);
+    (out, 8, 4, 4)
+}
+
+/// A CoD4 `.iwi` (version 6: "IWi", version, format, flags, width, height, depth, four file sizes; mips smallest first) as an IW4
+/// load definition {u8 levelCount, 3 pad, u32 flags, u32 D3D format, u32 size} + the levels largest first; returns (def, size,
+/// width, height). 3.19 (sub_BE7470) reads the u32 at +4 as the flags and counts the levels from it (bit 0x02 = one level), so the
+/// CoD4 zone layout {levelCount, flags, w, h, d} there makes it copy a full mip chain out of a one-level image and fault. None for a format
+/// with no direct D3D equivalent (RGB24) or another version.
+fn iwi6_load_def(b: &[u8]) -> Option<(Vec<u8>, u32, u32, u32)> {
+    if b.len() < 28 || &b[..3] != b"IWi" || b[3] != 6 {
+        return None;
+    }
+    let (fmt, flags) = (b[4], b[5]);
+    let (w, h, d) = (u16::from_le_bytes([b[6], b[7]]) as u32, u16::from_le_bytes([b[8], b[9]]) as u32, u16::from_le_bytes([b[10], b[11]]) as u32);
+    let (d3d, bpb, block) = match fmt {
+        1 => (0x15u32, 4u32, false),
+        3 => (0x33, 2, false),
+        4 => (0x1c, 1, false),
+        11 => (0x3154_5844, 8, true),
+        12 => (0x3354_5844, 16, true),
+        13 => (0x3554_5844, 16, true),
+        _ => return None,
+    };
+    if d > 1 {
+        return None; // volume
+    }
+    let faces: u32 = if flags & 0x04 != 0 { 6 } else { 1 };
+    let size = |lw: u32, lh: u32| if block { lw.div_ceil(4).max(1) * lh.div_ceil(4).max(1) * bpb } else { lw.max(1) * lh.max(1) * bpb };
+    // the engine counts levels from the flags (Image_CountMipmaps: IMG_FLAG_NOMIPMAPS 0x02 = one level, else the full chain)
+    // (sub_BE8C30: one level, then one more per doubling while 1 << n < width or height; non-power-of-two sizes round up)
+    let levels = if flags & 0x02 != 0 { 1 } else { 1 + w.max(h).max(1).next_power_of_two().trailing_zeros() };
+    let level_size = |l: u32| size((w >> l).max(1), (h >> l).max(1));
+    let total: u32 = (0..levels).map(level_size).sum::<u32>() * faces;
+    let data = &b[28..];
+    if (data.len() as u32) < total {
+        return None;
+    }
+    // the file: smallest level first, the faces inside each level. The load definition (R_LoadImage's upload loop): face by
+    // face, each face's levels largest first.
+    let mut at = std::collections::HashMap::new();
+    let mut o = 0u32;
+    for l in (0..levels).rev() {
+        for f in 0..faces {
+            at.insert((f, l), o);
+            o += level_size(l);
+        }
+    }
+    let mut out = Vec::with_capacity(16 + total as usize);
+    out.extend_from_slice(&[levels as u8, 0, 0, 0]);
+    // iwi flag bits 0x01..0x80 (nopicmip, nomipmaps, cube, volume, streaming, legacy normals, clamp u/v) are IW4's
+    out.extend_from_slice(&(flags as u32).to_le_bytes());
+    out.extend_from_slice(&d3d.to_le_bytes());
+    out.extend_from_slice(&total.to_le_bytes());
+    for f in 0..faces {
+        for l in 0..levels {
+            let o0 = at[&(f, l)] as usize;
+            out.extend_from_slice(&data[o0..o0 + level_size(l) as usize]);
+        }
+    }
+    Some((out, total, w, h))
+}
+
+fn iwd_image(name: &str) -> Option<(Vec<u8>, u32, u32, u32)> {
+    let (p, i) = IWD_IMAGES.lock().unwrap().as_ref()?.get(&name.to_ascii_lowercase())?.clone();
+    iwi6_load_def(&read_iwd_entry(&p, i)?)
+}
+
 fn follows(s: &Src, off: u32) -> u32 {
     if s.has(off) { INLINE } else { 0 }
 }
@@ -47,9 +230,22 @@ fn material(s: &Src, o: &mut Out) -> Result<(), String> {
     h.u8(28, if sort >= 30 { sort + 1 } else { sort });
     h.u8(29, s.u8(6));
     h.u8(30, s.u8(7));
-    h.raw(32, &s.bytes(24, 48)); // stateBitsEntry
-    h.raw(80, &s.bytes(72, 4)); // textureCount, constantCount, stateBitsCount, stateFlags
-    h.u32(84, s.u32(76)); // cameraRegion
+    if super::convert_zone::target_319() {
+        // 3.19: 49 state-bits entries (the new technique slot 46 takes the lit techniques' entry, as stock 3.19 materials do), the
+        // counts at +81, the camera region a byte at +85 numbered one higher from 3 on (QA 4 -> 3.19 5 in all 1,747 shared materials)
+        let e = s.bytes(24, 48);
+        let mut v = e[..46].to_vec();
+        v.push(e[9]);
+        v.extend_from_slice(&e[46..48]);
+        h.raw(32, &v);
+        h.raw(81, &s.bytes(72, 4));
+        let cam = s.u32(76);
+        h.u8(85, (if cam >= 3 { cam + 1 } else { cam }) as u8);
+    } else {
+        h.raw(32, &s.bytes(24, 48)); // stateBitsEntry
+        h.raw(80, &s.bytes(72, 4)); // textureCount, constantCount, stateBitsCount, stateFlags
+        h.u32(84, s.u32(76)); // cameraRegion
+    }
     h.u32(92, follows(s, 84));
     h.u32(96, follows(s, 88));
     h.u32(100, follows(s, 92));
@@ -97,12 +293,16 @@ fn material(s: &Src, o: &mut Out) -> Result<(), String> {
 /// pointers at +12. QA (208): the same with a word inserted at +4 (zero in all 1,683 QA sets), so the format word is at +8, the
 /// remapped pointer at +12 and the techniques at +16. A technique that several slots share is stored once; the other slots point at it.
 fn technique_set(s: &Src, o: &mut Out) -> Result<(), String> {
-    let mut h = Hdr::new(208);
+    // 3.19 (212 bytes) has a 49th slot inserted at 46, in front of the debug-bumpmap pair (139 of 139 technique sets of
+    // mp_crash_tropical in both builds); stock sets share one technique there, a debug view: converted sets leave it empty
+    let v319 = super::convert_zone::target_319();
+    let slot_at = |i: usize| 16 + 4 * if v319 && i >= 46 { i + 1 } else { i };
+    let mut h = Hdr::new(if v319 { 212 } else { 208 });
     h.u32(0, follows(s, 0));
     h.raw(8, &s.bytes(4, 4));
     let slots: Vec<u32> = (0..48).map(|i| s.u32(12 + 4 * i)).collect();
     for (i, &p) in slots.iter().enumerate() {
-        h.u32(16 + 4 * i as usize, if p != 0 { INLINE } else { 0 });
+        h.u32(slot_at(i), if p != 0 { INLINE } else { 0 });
     }
     o.put(&h.0);
     if let Some(name) = s.cstr(0) {
@@ -114,7 +314,7 @@ fn technique_set(s: &Src, o: &mut Out) -> Result<(), String> {
             continue;
         }
         if let Some(&target) = first_at.get(&p) {
-            o.inner(16 + 4 * i, target);
+            o.inner(slot_at(i), target);
             continue;
         }
         first_at.insert(p, o.pos());
@@ -127,7 +327,7 @@ fn technique_set(s: &Src, o: &mut Out) -> Result<(), String> {
 /// between IW4's, and its matrices start at 247: QA = 249 + 4 * group + slot from IW4's view matrix (0x4C) on, with the
 /// transpose bit flipped (QA's world shader, the same byte code as CoD4's, reads `viewProjectionMatrix` from 257 where IW4
 /// names TRANSPOSE_VIEW_PROJECTION_MATRIX). Read from the constant tables of QA's own shaders against their arguments
-/// (mp_crash_tropical, code_post_gfx_mp; 2026-11-23). Unconverted, the world's matrices were read as empty vectors and
+/// (mp_crash_tropical, code_post_gfx_mp; 2026-11-23). 3.19 numbers them the same (79 of 79 shared names, its own zones). Unconverted, the world's matrices were read as empty vectors and
 /// nothing was drawn.
 fn qa_code_const(i: u16) -> u16 {
     match i {
@@ -221,6 +421,72 @@ fn technique(t: &Src, o: &mut Out) -> Result<(), String> {
 fn image(s: &Src, o: &mut Out) -> Result<(), String> {
     let mut h = Hdr::new(52);
     h.u32(0, follows(s, 0));
+    let name = s.cstr(28).unwrap_or_default();
+    let empty = !s.has(0) || s.v.u32(s.u32(0) + 12).unwrap_or(0) == 0;
+    let name_s = String::from_utf8_lossy(&name).into_owned();
+    // names with ',' (a reference) or '$' (made by the engine) are never files
+    let fileish = !name_s.starts_with(',') && !name_s.starts_with('$');
+    let map_2d = s.u8(4) == 3;
+    // 3.19: a 2D image goes out as a loose file and stays streamed in the zone
+    let loose_on = LOOSE_IMAGES.lock().unwrap().is_some();
+    if empty && fileish && map_2d && loose_on {
+        let file = match iwd_raw(&name_s) {
+            Some(raw) => iwi6_to_iwi9(&raw).filter(|f| f.len() <= 0xC0_0000),
+            None => PLACEHOLDERS.load(std::sync::atomic::Ordering::Relaxed).then(|| {
+                if std::env::var_os("ATLAS_LIST_EMPTY_IMAGES").is_some() {
+                    eprintln!("placeholder image: {name_s}");
+                }
+                placeholder_iwi9()
+            }),
+        };
+        if let Some(f) = file {
+            if let Some(v) = LOOSE_IMAGES.lock().unwrap().as_mut() {
+                if !v.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name_s)) {
+                    v.push((name_s.clone(), f));
+                }
+            }
+            return stock_image(s, o, &name);
+        }
+    }
+    let injected = if !empty || !fileish {
+        None
+    } else {
+        iwd_image(&name_s).or_else(|| {
+            (map_2d && PLACEHOLDERS.load(std::sync::atomic::Ordering::Relaxed)).then(|| {
+                if std::env::var_os("ATLAS_LIST_EMPTY_IMAGES").is_some() {
+                    eprintln!("placeholder image: {name_s}");
+                }
+                placeholder_load_def()
+            })
+        })
+    };
+    if empty && injected.is_none() && std::env::var_os("ATLAS_LIST_EMPTY_IMAGES").is_some() {
+        eprintln!("empty image (read from disk by the game): {name_s} (map type {})", s.u8(4));
+    }
+    if let Some((def, total, w, hh)) = &injected {
+        // pixels from the map's IWD: inline, not reducible, card memory = the data
+        h.u32(0, INLINE);
+        h.raw(4, &s.bytes(4, 4));
+        h.u32(12, 1);
+        for off in [16, 20, 24, 28] {
+            h.u32(off, *total);
+        }
+        h.u32(32, w | hh << 16);
+        h.u32(36, 1);
+        h.u32(40, 2);
+        h.u32(48, INLINE);
+        o.put(&h.0);
+        o.put_str(&name);
+        o.put(def);
+        return Ok(());
+    }
+    stock_image(s, o, &name)
+}
+
+/// The image as the source has it (its own load definition, or none for a streamed one).
+fn stock_image(s: &Src, o: &mut Out, name: &[u8]) -> Result<(), String> {
+    let mut h = Hdr::new(52);
+    h.u32(0, follows(s, 0));
     h.raw(4, &s.bytes(4, 4));
     if s.u8(10) != 0 {
         h.u32(12, 1);
@@ -241,7 +507,7 @@ fn image(s: &Src, o: &mut Out) -> Result<(), String> {
     h.u32(40, 2);
     h.u32(48, INLINE);
     o.put(&h.0);
-    o.put_str(&s.cstr(28).unwrap_or_default());
+    o.put_str(name);
     if s.has(0) {
         let def = s.u32(0);
         let head = s.v.bytes(def, 16).ok_or("image load definition outside the loaded memory")?.to_vec();

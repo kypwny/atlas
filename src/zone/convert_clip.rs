@@ -146,6 +146,180 @@ fn clip_map(s: &Src, o: &mut Out) -> Result<(), String> {
     cx.arrays[EDGES] = Arr { base: s.u32(44), len: edges as u32, stream: None };
     cx.arrays[LEAF_BRUSHES] = Arr { base: s.u32(76), len: (lb * 2) as u32, stream: None };
     cx.arrays[BORDERS] = Arr { base: s.u32(112), len: (borders * 28) as u32, stream: None };
+    // ATLAS_CLIP_DUMP=FILE: index, box (mid, half) and contents of every brush, one per line (debug)
+    if let Some(path) = std::env::var_os("ATLAS_CLIP_DUMP") {
+        let f = |a: u32| s.v.bytes(a, 4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).unwrap_or(f32::NAN);
+        let (bb, bc) = (s.u32(148), s.u32(152));
+        let mut txt = String::new();
+        for i in 0..brushes as u32 {
+            let c = s.v.bytes(bc + 4 * i, 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
+            let ns = s.v.bytes(s.u32(144) + 36 * i, 2).map(|b| u16::from_le_bytes([b[0], b[1]])).unwrap_or(0);
+            txt += &format!("{i} {} {} {} {} {} {} {c:#x} {ns}\n", f(bb + 24 * i), f(bb + 24 * i + 4), f(bb + 24 * i + 8), f(bb + 24 * i + 12), f(bb + 24 * i + 16), f(bb + 24 * i + 20));
+        }
+        let _ = std::fs::write(path, txt);
+    }
+    // ATLAS_CLIP_PROBE="x y": the brushes whose box covers that column and the terrain triangles under it (debug)
+    if let Some(p) = std::env::var("ATLAS_CLIP_PROBE").ok() {
+        let xy: Vec<f32> = p.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+        if xy.len() >= 2 {
+            let f = |a: u32| s.v.bytes(a, 4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).unwrap_or(f32::NAN);
+            let (bb, bc) = (s.u32(148), s.u32(152));
+            let mut hits = Vec::new();
+            for i in 0..brushes as u32 {
+                let (mx, my, mz, hx, hy, hz) = (f(bb + 24 * i), f(bb + 24 * i + 4), f(bb + 24 * i + 8), f(bb + 24 * i + 12), f(bb + 24 * i + 16), f(bb + 24 * i + 20));
+                if (xy[0] - mx).abs() <= hx && (xy[1] - my).abs() <= hy && mz - hz < 200.0 && mz + hz > -400.0 {
+                    let c = s.v.bytes(bc + 4 * i, 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
+                    hits.push(format!("brush {i}: z {:.0}..{:.0} contents {c:#x}", mz - hz, mz + hz));
+                }
+            }
+            // every brush a leaf-brush node lists (IW4 cLeafBrushNode_s: axis u8, leafBrushCount s16 +2, contents +4, leaf brushes +8)
+            let (np, nn) = (s.u32(68), lbn as u32);
+            let mut reach = vec![false; brushes];
+            let mut leaf_nodes = 0;
+            for k in 0..nn {
+                let cnt = s.v.bytes(np + 20 * k + 2, 2).map(|b| i16::from_le_bytes([b[0], b[1]])).unwrap_or(0);
+                if cnt > 0 {
+                    leaf_nodes += 1;
+                    let lp = s.v.bytes(np + 20 * k + 8, 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
+                    for q in 0..cnt as u32 {
+                        if let Some(b) = s.v.bytes(lp + 2 * q, 2) {
+                            let v = u16::from_le_bytes([b[0], b[1]]) as usize;
+                            if v < brushes {
+                                reach[v] = true;
+                            }
+                        }
+                    }
+                }
+            }
+            eprintln!("clip probe: {} of {} brushes are in a leaf-brush node list ({} leaf nodes of {})", reach.iter().filter(|r| **r).count(), brushes, leaf_nodes, nn);
+            for h in hits.iter_mut() {
+                let i: usize = h.split(':').next().unwrap().trim_start_matches("brush ").parse().unwrap_or(0);
+                h.push_str(if reach.get(i).copied().unwrap_or(false) { " (in a leaf list)" } else { " (IN NO LEAF LIST)" });
+            }
+            // the leaf of the point (cNode_t: plane +0, children s16 +4/+6; cplane_s: normal, dist +12) and its leaf-brush subtree
+            if xy.len() >= 3 {
+                let u = |a: u32| s.v.bytes(a, 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
+                let i16at = |a: u32| s.v.bytes(a, 2).map(|b| i16::from_le_bytes([b[0], b[1]])).unwrap_or(0);
+                let (nodes_p, leafs_p) = (s.u32(52), s.u32(60));
+                let mut num: i32 = 0;
+                let mut guard = 0;
+                while num >= 0 && guard < 10000 {
+                    guard += 1;
+                    let node = nodes_p + 8 * num as u32;
+                    let pl = u(node);
+                    let d = f(pl) * xy[0] + f(pl + 4) * xy[1] + f(pl + 8) * xy[2] - f(pl + 12);
+                    num = i16at(node + if d >= 0.0 { 4 } else { 6 }) as i32;
+                }
+                let leaf = (-1 - num) as u32;
+                let lr = leafs_p + 40 * leaf;
+                let (bc, first_lbn) = (u(lr + 4), u(lr + 36));
+                let mut set = std::collections::BTreeSet::new();
+                let mut stack = vec![first_lbn];
+                let mut visited = 0;
+                while let Some(k) = stack.pop() {
+                    visited += 1;
+                    if visited > 100000 || k >= nn {
+                        break;
+                    }
+                    let cnt = i16at(np + 20 * k + 2);
+                    if cnt > 0 {
+                        let lp = u(np + 20 * k + 8);
+                        for q in 0..cnt as u32 {
+                            set.insert(s.v.bytes(lp + 2 * q, 2).map(|b| u16::from_le_bytes([b[0], b[1]])).unwrap_or(0));
+                        }
+                    } else {
+                        for c in 0..2u32 {
+                            let off = s.v.bytes(np + 20 * k + 16 + 2 * c, 2).map(|b| u16::from_le_bytes([b[0], b[1]])).unwrap_or(0) as u32;
+                            if off > 0 {
+                                stack.push(k + off);
+                            }
+                        }
+                    }
+                }
+                eprintln!("clip probe point {:?}: leaf {leaf}, brushContents {bc:#x}, leafBrushNode {first_lbn}, {} brushes reachable, 3508 in it: {}, first: {:?}",
+                    &xy[..3], set.len(), set.contains(&3508), set.iter().take(10).collect::<Vec<_>>());
+                // the engine's pruned walk for the point (colltree::Tree::visit), with childOffset[0] above dist, and swapped
+                for swap in [false, true] {
+                    let mut got = std::collections::BTreeSet::new();
+                    let mut st = vec![first_lbn];
+                    let mut n_vis = 0;
+                    while let Some(mut k) = st.pop() {
+                        loop {
+                            n_vis += 1;
+                            if n_vis > 200000 || k >= nn {
+                                break;
+                            }
+                            let cnt = i16at(np + 20 * k + 2);
+                            if cnt > 0 {
+                                let lp = u(np + 20 * k + 8);
+                                for q in 0..cnt as u32 {
+                                    got.insert(s.v.bytes(lp + 2 * q, 2).map(|b| u16::from_le_bytes([b[0], b[1]])).unwrap_or(0));
+                                }
+                                break;
+                            }
+                            if cnt < 0 {
+                                st.push(k + 1);
+                            }
+                            let axis = s.v.bytes(np + 20 * k, 1).map(|b| b[0]).unwrap_or(0) as usize % 3;
+                            let dist = f(np + 20 * k + 8);
+                            let co = |c: u32| s.v.bytes(np + 20 * k + 16 + 2 * c, 2).map(|b| u16::from_le_bytes([b[0], b[1]])).unwrap_or(0) as u32;
+                            let (above, below) = if swap { (co(1), co(0)) } else { (co(0), co(1)) };
+                            if xy[axis] > dist {
+                                k += above;
+                            } else {
+                                k += below;
+                            }
+                        }
+                    }
+                    eprintln!("  pruned point walk ({}): {} brushes, 3508 in it: {}", if swap { "children swapped" } else { "engine order" }, got.len(), got.contains(&3508));
+                }
+                let lb: Vec<f32> = (0..6u32).map(|k| f(lr + 12 + 4 * k)).collect();
+                eprintln!("  leaf {leaf} bounds (mid/half) {lb:?}");
+                // which leaf-brush nodes list brush 3508, and which leaves start a subtree holding one of them
+                let holders: Vec<u32> = (0..nn).filter(|&k| {
+                    let cnt = i16at(np + 20 * k + 2);
+                    cnt > 0 && (0..cnt as u32).any(|q| s.v.bytes(u(np + 20 * k + 8) + 2 * q, 2).map(|b| u16::from_le_bytes([b[0], b[1]])) == Some(3508))
+                }).collect();
+                eprintln!("  lb nodes listing 3508: {holders:?}");
+                for k in first_lbn..(first_lbn + 56).min(nn) {
+                    let b = s.v.bytes(np + 20 * k, 20).unwrap_or(&[0; 20]).to_vec();
+                    let cnt = i16::from_le_bytes([b[2], b[3]]);
+                    let contents = u32::from_le_bytes(b[4..8].try_into().unwrap());
+                    let dist = f32::from_le_bytes(b[8..12].try_into().unwrap());
+                    let co = (u16::from_le_bytes([b[16], b[17]]), u16::from_le_bytes([b[18], b[19]]));
+                    eprintln!("  lbn {k}: axis {} count {cnt} contents {contents:#x} dist {dist} childOffset {co:?}", b[0]);
+                }
+                let nl = leafs as u32;
+                for l in 0..nl {
+                    let r = leafs_p + 40 * l;
+                    let st = u(r + 36);
+                    if holders.iter().any(|&h| h >= st && h < st + 64) {
+                        let b: Vec<f32> = (0..6u32).map(|k| f(r + 12 + 4 * k)).collect();
+                        eprintln!("  leaf {l}: leafBrushNode {st} bounds {b:?}");
+                    }
+                }
+            }
+            eprintln!("clip probe {xy:?}: {} brushes ({} total)", hits.len(), brushes);
+            for h in hits.iter().take(40) {
+                eprintln!("  {h}");
+            }
+            let (vp, tp) = (s.u32(92), s.u32(100));
+            let mut tri_hits = 0;
+            for t in 0..tris as u32 {
+                let idx: Vec<u32> = (0..3).map(|k| s.v.bytes(tp + 6 * t + 2 * k, 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as u32).unwrap_or(0)).collect();
+                let v: Vec<[f32; 3]> = idx.iter().map(|&i| [f(vp + 12 * i), f(vp + 12 * i + 4), f(vp + 12 * i + 8)]).collect();
+                let s2 = |a: [f32; 3], b: [f32; 3]| (b[0] - a[0]) * (xy[1] - a[1]) - (b[1] - a[1]) * (xy[0] - a[0]);
+                let (d0, d1, d2) = (s2(v[0], v[1]), s2(v[1], v[2]), s2(v[2], v[0]));
+                if (d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0) || (d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0) {
+                    tri_hits += 1;
+                    if tri_hits <= 10 {
+                        eprintln!("  terrain tri {t}: z {:.0} {:.0} {:.0}", v[0][2], v[1][2], v[2][2]);
+                    }
+                }
+            }
+            eprintln!("clip probe: {tri_hits} terrain triangles under it ({tris} total, {verts} vertices)");
+        }
+    }
 
     let mut h = Hdr::new(256);
     h.u32(0, if s.has(0) { INLINE } else { 0 });
@@ -273,7 +447,13 @@ fn clip_map(s: &Src, o: &mut Out) -> Result<(), String> {
             let leaves = r.u16(2) as i16;
             let p = r.u32(8);
             let w = start + 20 * i + 8;
-            o.set(w, 0);
+            // Only a leaf (count > 0) holds a pointer here. An interior node holds its split distance at +8 (then range, child
+            // offsets): clearing it for every node set every split plane to 0, so traces walked the wrong side of the tree and
+            // missed most brushes (mp_citystreets on 3.19: players walked through walls and cars; the server's codol_trace and
+            // codol_leafbrushes showed dist 0 on every interior node).
+            if leaves > 0 {
+                o.set(w, 0);
+            }
             if leaves > 0 && p != 0 {
                 if let Some(k) = cx.arrays[LEAF_BRUSHES].index_of(p, 2) {
                     cx.pending.push((w, LEAF_BRUSHES, 2 * k));
