@@ -146,25 +146,91 @@ fn gfx_world_to_iw4(c: &mut Conv, s: S, t: T) -> R {
                 for k in 0..n {
                     c.generic(S { sid: sk, addr: src + k * ssz }, T { sid: tk, addr: arr + k * tsz })?;
                 }
-                // Static models: every reference of the cell goes into its root node. At load the IW4-line engines (3.19
-                // sub_C0E9C0) stable-sort the static models by their first material's sorted index and renumber the model
-                // lists of each cell's ROOT node only (and the primary lights' lists). Stock maps come presorted, so nothing
-                // moves; IW3 lists models at every tree level, and after the sort the deeper lists named other models, culled
-                // by the wrong node box (mp_citystreets: 18,453 of 25,784 references; props popped with view and distance).
-                // Each model is still culled by its own bounds and cull distance.
-                let mut all: Vec<u16> = Vec::new();
+                // Static models. The IW4-line culling (3.19 sub_C10A40 / sub_BFAA00) reads a node's model list only at a LEAF
+                // (childCount 0); at load the engine (3.19 sub_C0E9C0) stable-sorts the static models by their first
+                // material's sorted index and renumbers the list of each cell's ROOT node only (and the primary lights' lists).
+                // Stock trees satisfy both: the root's list is every leaf's list end to end, and each leaf points into it
+                // (the member is a reusable pointer), so the one renumber covers them all. IW3 lists models at every level
+                // with separate arrays: copied as they were, the deeper lists named other models after the sort (props
+                // popped); all hoisted into the root, they were never drawn in any cell whose root has children
+                // (mp_citystreets: only cell 10 kept its props). So each model goes down to the leaves under the node that
+                // listed it whose box meets the model's bounds (all of them if none does), and the leaves alias the root.
+                let node_src = |k: u32| S { sid: sk, addr: src + k * ssz };
+                let child_range = |c: &Conv, k: u32| -> (u32, u32) {
+                    let nd = node_src(k);
+                    let cc = c.si(nd, "childCount").max(0) as u32;
+                    if cc == 0 {
+                        return (0, 0);
+                    }
+                    let off = c.si(nd, "childrenOffset");
+                    let first = ((nd.addr as i64 + off - src as i64) / ssz as i64).max(0) as u32;
+                    (first, cc)
+                };
+                let model_box = |c: &Conv, v: u16| -> Option<([f32; 3], [f32; 3])> {
+                    let d = c.ssub(s, "dpvs")?;
+                    let ik = c.ssid("GfxStaticModelInst")?;
+                    let insts = c.sp(d, "smodelInsts");
+                    if insts == 0 || (v as i64) >= c.si(d, "smodelCount") {
+                        return None;
+                    }
+                    let inst = S { sid: ik, addr: insts + v as u32 * c.ssize(ik) };
+                    let (mn, mx) = (c.s_at(inst, "mins"), c.s_at(inst, "maxs"));
+                    Some(([f32_at(c, mn), f32_at(c, mn + 4), f32_at(c, mn + 8)], [f32_at(c, mx), f32_at(c, mx + 4), f32_at(c, mx + 8)]))
+                };
+                let node_box = |c: &Conv, k: u32| -> ([f32; 3], [f32; 3]) {
+                    let nd = node_src(k);
+                    let (mn, mx) = (c.s_at(nd, "mins"), c.s_at(nd, "maxs"));
+                    ([f32_at(c, mn), f32_at(c, mn + 4), f32_at(c, mn + 8)], [f32_at(c, mx), f32_at(c, mx + 4), f32_at(c, mx + 8)])
+                };
+                let mut leaf_lists: Vec<Vec<u16>> = vec![Vec::new(); n as usize];
                 for k in 0..n {
-                    let node = S { sid: sk, addr: src + k * ssz };
+                    let node = node_src(k);
                     let cnt = c.si(node, "smodelIndexCount").max(0) as u32;
                     let list = c.sp(node, "smodelIndexes");
+                    if cnt == 0 || list == 0 {
+                        continue;
+                    }
+                    // the leaves under node k
+                    let mut leaves = Vec::new();
+                    let mut stack = vec![k];
+                    while let Some(x) = stack.pop() {
+                        if x >= n {
+                            continue;
+                        }
+                        let (first, cc) = child_range(c, x);
+                        if cc == 0 {
+                            leaves.push(x);
+                        } else {
+                            stack.extend(first..first + cc);
+                        }
+                    }
                     for q in 0..cnt {
-                        if let Some(b) = c.s_bytes(list + 2 * q, 2) {
-                            all.push(u16::from_le_bytes([b[0], b[1]]));
+                        let Some(b) = c.s_bytes(list + 2 * q, 2) else { continue };
+                        let v = u16::from_le_bytes([b[0], b[1]]);
+                        let hit: Vec<u32> = match model_box(c, v) {
+                            Some((a0, a1)) => leaves
+                                .iter()
+                                .copied()
+                                .filter(|&l| {
+                                    let (b0, b1) = node_box(c, l);
+                                    (0..3).all(|ax| a0[ax] <= b1[ax] + 1.0 && a1[ax] >= b0[ax] - 1.0)
+                                })
+                                .collect(),
+                            None => Vec::new(),
+                        };
+                        for l in if hit.is_empty() { leaves.clone() } else { hit } {
+                            leaf_lists[l as usize].push(v);
                         }
                     }
                 }
-                all.sort_unstable();
-                all.dedup();
+                let mut all: Vec<u16> = Vec::new();
+                let mut starts = vec![0usize; n as usize];
+                for (k, l) in leaf_lists.iter_mut().enumerate() {
+                    l.sort_unstable();
+                    l.dedup();
+                    starts[k] = all.len();
+                    all.extend_from_slice(l);
+                }
                 for k in 0..n {
                     let node = T { sid: tk, addr: arr + k * tsz };
                     c.t_set_i(node, "smodelIndexCount", 0);
@@ -174,6 +240,15 @@ fn gfx_world_to_iw4(c: &mut Conv, s: S, t: T) -> R {
                     let bytes: Vec<u8> = all.iter().flat_map(|v| v.to_le_bytes()).collect();
                     let a = c.heap.alloc(bytes.len(), 2);
                     c.heap.put(a, &bytes);
+                    for k in 1..n {
+                        let l = &leaf_lists[k as usize];
+                        if !l.is_empty() {
+                            let node = T { sid: tk, addr: arr + k * tsz };
+                            c.t_set_i(node, "smodelIndexCount", l.len() as i64);
+                            c.t_set_ptr(node, "smodelIndexes", a + 2 * starts[k as usize] as u32);
+                        }
+                    }
+                    // the root owns the whole array (written first, renumbered by the engine); a leaf root lists it all too
                     let root = T { sid: tk, addr: arr };
                     c.t_set_i(root, "smodelIndexCount", all.len() as i64);
                     c.t_set_ptr(root, "smodelIndexes", a);

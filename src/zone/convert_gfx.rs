@@ -237,6 +237,11 @@ fn material(s: &Src, o: &mut Out) -> Result<(), String> {
         let mut v = e[..46].to_vec();
         v.push(e[9]);
         v.extend_from_slice(&e[46..48]);
+        // no depth-prepass entry (CoD4 ambient sets had no such technique; the 3.19 set they map to has one): the
+        // shadow-build entry is the same kind of pass (depth only, the same alpha test)
+        if v[0] == 0xFF && v[2] != 0xFF {
+            v[0] = v[2];
+        }
         h.raw(32, &v);
         h.raw(81, &s.bytes(72, 4));
         let cam = s.u32(76);
@@ -289,6 +294,27 @@ fn material(s: &Src, o: &mut Out) -> Result<(), String> {
     Ok(())
 }
 
+/// The 3.19 technique set a CoD4 model set name maps to. 3.19 keeps several CoD4 names only as placeholders whose every slot is
+/// the debug technique `textured_3d` (read from the 3.19 client's loaded sets, 2026-11-25): mc_ambient_t0c0, mc_l_r0c0n0s0,
+/// mc_l_t0c0n0s0, mc_unlit, mc_unlit_replace, mc_unlit_alphatest, mc_effect_zfeather_falloff_add_nofog(_eyeoffset); grass,
+/// bushes and palm fronds drew as black cards and streaks with them. Others are missing (mc_l_r0c0n0, mc_l_t0c0 ...). The
+/// shadow-mapped `mc_l_sm_` set with the same inputs is real for every CoD4 lit name, so lit and ambient names go there.
+fn techset_name_319(name: &[u8]) -> Vec<u8> {
+    let s = String::from_utf8_lossy(name).into_owned();
+    let mapped = if let Some(rest) = s.strip_prefix("mc_ambient_") {
+        format!("mc_l_sm_{rest}")
+    } else if let Some(rest) = s.strip_prefix("mc_l_").filter(|r| r.starts_with('r') || r.starts_with('t')) {
+        format!("mc_l_sm_{rest}")
+    } else if matches!(s.as_str(), "mc_unlit" | "mc_unlit_replace" | "mc_unlit_alphatest") {
+        "mc_unlit_replace_lin".to_string()
+    } else if s.starts_with("mc_effect_zfeather_falloff_add_nofog") || s == "mc_effect_falloff_add_nofog_eyeoffset" {
+        "mc_effect_falloff_add_nofog".to_string()
+    } else {
+        s
+    };
+    mapped.into_bytes()
+}
+
 /// Technique set. Stock (204 bytes): name, worldVertFormat/hasBeenUploaded/unused (4), remappedTechniqueSet (runtime), 48 technique
 /// pointers at +12. QA (208): the same with a word inserted at +4 (zero in all 1,683 QA sets), so the format word is at +8, the
 /// remapped pointer at +12 and the techniques at +16. A technique that several slots share is stored once; the other slots point at it.
@@ -296,6 +322,25 @@ fn technique_set(s: &Src, o: &mut Out) -> Result<(), String> {
     // 3.19 (212 bytes) has a 49th slot inserted at 46, in front of the debug-bumpmap pair (139 of 139 technique sets of
     // mp_crash_tropical in both builds); stock sets share one technique there, a debug view: converted sets leave it empty
     let v319 = super::convert_zone::target_319();
+    // 3.19: a CoD4 model technique set (mc_*) is written as a reference by name, so the client uses its own set of that name.
+    // CoD4's model shaders decode the model-lighting texture (code sampler 3, baseLightingCoords, lightingLookupScale) the
+    // CoD4 way; 3.19 fills that texture its own way, and dynamic props drawn with the map's own CoD4 sets came out black
+    // (mp_citystreets: wood crates, palms, potted plants) while the sets the CoD4 zone already referenced by name drew right.
+    // ATLAS_319_OWN_TECHSETS=1 keeps the map's own sets.
+    if v319 && std::env::var_os("ATLAS_319_OWN_TECHSETS").is_none() {
+        let full = s.cstr(0).unwrap_or_default();
+        let name = full.strip_prefix(b",").unwrap_or(&full);
+        if name.starts_with(b"mc_") {
+            let mut h = Hdr::new(212);
+            h.u32(0, INLINE);
+            h.raw(8, &s.bytes(4, 4));
+            o.put(&h.0);
+            let mut r = b",".to_vec();
+            r.extend_from_slice(&techset_name_319(name));
+            o.put_str(&r);
+            return Ok(());
+        }
+    }
     let slot_at = |i: usize| 16 + 4 * if v319 && i >= 46 { i + 1 } else { i };
     let mut h = Hdr::new(if v319 { 212 } else { 208 });
     h.u32(0, follows(s, 0));

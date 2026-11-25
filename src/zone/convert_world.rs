@@ -191,12 +191,25 @@ fn gfx_world(s: &Src, o: &mut Out) -> Result<(), String> {
             let a = s.v.bytes(p, 44 * c).ok_or("tree nodes outside the loaded memory")?.to_vec();
             let mut out = a.clone();
             inline_words(&mut out, 44, &[36]);
-            o.put(&out);
+            let nodes_at = o.put(&out);
+            // a node's static-model list that lies inside the root's (leaves alias the root's array, which the engine
+            // renumbers after its model sort; see convert_iw3_world) stays an alias: an offset into the root's data
+            let root = t.sub(0);
+            let (rp, rn) = if root.has(36) { (root.u32(36), root.u16(34) as u32) } else { (0, 0) };
+            let mut root_at = None;
             for j in 0..c {
                 let nd = t.sub(44 * j as u32);
                 if nd.has(36) {
                     let m = nd.u16(34) as usize;
-                    o.put(&need(&nd, 36, m, 2, "tree surfaces")?);
+                    let p = nd.u32(36);
+                    if let Some(ra) = root_at.filter(|_| j > 0 && p >= rp && p + 2 * m as u32 <= rp + 2 * rn) {
+                        o.inner(nodes_at + 44 * j + 36, ra + (p - rp) as usize);
+                        continue;
+                    }
+                    let at = o.put(&need(&nd, 36, m, 2, "tree surfaces")?);
+                    if j == 0 {
+                        root_at = Some(at);
+                    }
                 }
             }
         }
