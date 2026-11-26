@@ -158,24 +158,38 @@ use rsa::Oaep;
 use sha2::Sha256;
 use crate::source::{Listing, Provider};
 use anyhow::{Context, Result, bail};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use crate::ifs_cache::{self, ArchiveRec, Cache, Fingerprint};
 
 /// Archives opened by one helper process before it is replaced: the DLL keeps memory for every archive it opens, and the
 /// 32-bit process runs out of address space (and the DLL throws) after a few hundred.
 const OPENS_PER_PROCESS: usize = 40;
 
+/// How long the helper may stay silent in the middle of a reply. `IFS2.dll` can block for good, for example while the running
+/// game's updater (IIPS) rewrites the archives; without a limit the image scan would wait forever.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeouts after which the helper is not asked again in this session: what is not in the cache then stays unread.
+const MAX_STRIKES: usize = 2;
+
 struct Helper {
     exe: PathBuf,
     dll: PathBuf,
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// The helper's output, read on a thread of its own so that a reply can time out; `pending` holds what is not consumed yet.
+    output: Receiver<Vec<u8>>,
+    pending: Vec<u8>,
     open: Option<usize>,
     opens: usize,
+    /// Replies that timed out (kept across respawns), and the archives that were open when they did.
+    strikes: usize,
+    stuck: std::collections::HashSet<usize>,
 }
 
 impl Helper {
@@ -193,31 +207,90 @@ impl Helper {
         }
         let mut child = cmd.spawn().with_context(|| format!("starting {}", helper.display()))?;
         let stdin = child.stdin.take().context("helper has no stdin")?;
-        let mut stdout = BufReader::new(child.stdout.take().context("helper has no stdout")?);
-        let mut hello = String::new();
-        stdout.read_line(&mut hello)?;
+        let mut stdout = child.stdout.take().context("helper has no stdout")?;
+        let (tx, output) = channel();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 1 << 16];
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let mut h = Helper { exe: helper.to_path_buf(), dll: dll.to_path_buf(), child, stdin, output, pending: Vec::new(), open: None, opens: 0, strikes: 0, stuck: Default::default() };
+        let hello = h.line()?;
         if !hello.starts_with("OK") {
             bail!("IFS helper: {}", hello.trim());
         }
-        Ok(Helper { exe: helper.to_path_buf(), dll: dll.to_path_buf(), child, stdin, stdout, open: None, opens: 0 })
+        Ok(h)
     }
 
-    /// Replaces the process with a fresh one (nothing is open afterwards).
+    /// Replaces the process with a fresh one (nothing is open afterwards); the strikes and stuck archives carry over.
     fn respawn(&mut self) -> Result<()> {
+        let (strikes, stuck) = (self.strikes, std::mem::take(&mut self.stuck));
         *self = Helper::spawn(&self.exe.clone(), &self.dll.clone())?;
+        (self.strikes, self.stuck) = (strikes, stuck);
         Ok(())
     }
 
-    fn line(&mut self) -> Result<String> {
-        let mut s = String::new();
-        if self.stdout.read_line(&mut s)? == 0 {
-            self.open = None;
-            bail!("the IFS helper stopped");
+    /// False once the helper timed out too often: it is not asked again.
+    fn usable(&self) -> bool {
+        self.strikes < MAX_STRIKES
+    }
+
+    /// Waits for more output, at most [`REPLY_TIMEOUT`]; on a timeout the process is killed and the open archive marked stuck.
+    fn fill(&mut self) -> Result<()> {
+        match self.output.recv_timeout(REPLY_TIMEOUT) {
+            Ok(chunk) => {
+                self.pending.extend_from_slice(&chunk);
+                Ok(())
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                let _ = self.child.kill();
+                self.strikes += 1;
+                if let Some(a) = self.open.take() {
+                    self.stuck.insert(a);
+                }
+                let note = if self.usable() { "" } else { "; it is not asked again until atlas restarts (is the game or its updater using the archives?)" };
+                crate::log::log(format!("IFS: the helper did not answer for {} s{note}", REPLY_TIMEOUT.as_secs()));
+                bail!("the IFS helper did not answer")
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                self.open = None;
+                bail!("the IFS helper stopped")
+            }
         }
-        Ok(s.trim_end().to_string())
+    }
+
+    fn line(&mut self) -> Result<String> {
+        loop {
+            if let Some(i) = self.pending.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = self.pending.drain(..=i).collect();
+                return Ok(String::from_utf8_lossy(&line).trim_end().to_string());
+            }
+            self.fill()?;
+        }
+    }
+
+    fn bytes(&mut self, n: usize) -> Result<Vec<u8>> {
+        while self.pending.len() < n {
+            self.fill()?;
+        }
+        Ok(self.pending.drain(..n).collect())
     }
 
     fn ensure_open(&mut self, index: usize, path: &Path) -> Result<()> {
+        if !self.usable() {
+            bail!("the IFS helper stopped answering earlier");
+        }
+        if self.stuck.contains(&index) {
+            bail!("{}: the IFS helper hung on this archive earlier", path.display());
+        }
         if self.open == Some(index) && self.child.try_wait().ok().flatten().is_none() {
             return Ok(());
         }
@@ -226,12 +299,19 @@ impl Helper {
         }
         writeln!(self.stdin, "OPEN {}", path.display())?;
         self.stdin.flush()?;
-        let r = self.line()?;
+        // marked open while waiting, so that a timeout knows which archive hung
+        self.open = Some(index);
+        let r = match self.line() {
+            Ok(r) => r,
+            Err(e) => {
+                self.open = None;
+                return Err(e);
+            }
+        };
         if r != "OK" {
             self.open = None;
             bail!("{}: {r}", path.display());
         }
-        self.open = Some(index);
         self.opens += 1;
         Ok(())
     }
@@ -243,9 +323,7 @@ impl Helper {
         }
         let r = self.line()?;
         let Some(n) = r.strip_prefix("OK ").and_then(|n| n.parse::<usize>().ok()) else { bail!("{name}: {r}") };
-        let mut buf = vec![0u8; n];
-        self.stdout.read_exact(&mut buf)?;
-        Ok(buf)
+        self.bytes(n)
     }
 }
 
@@ -432,9 +510,12 @@ impl IfsStore {
         h.ensure_open(archive, &self.archives[archive])?;
         match h.read(name) {
             Ok(v) => Ok(v),
-            // the process may have died on the way: start a fresh one and try once more
+            // the process may have died on the way: start a fresh one and try once more (after a timeout ensure_open refuses
+            // the archive, or the helper altogether)
             Err(_) => {
-                h.respawn()?;
+                if h.usable() && !h.stuck.contains(&archive) {
+                    h.respawn()?;
+                }
                 h.ensure_open(archive, &self.archives[archive])?;
                 h.read(name)
             }
@@ -632,5 +713,35 @@ mod tests {
         let mut second = [0u8; 16];
         second[14] = 1;
         assert_eq!(&two_blocks[16..], &ctr_be(&key.cipher, second, &[0u8; 16])[..]);
+    }
+
+    /// A helper that greets and then never answers: the reply times out instead of blocking, and after the second timeout the
+    /// helper is not asked again.
+    #[cfg(windows)]
+    #[test]
+    fn a_silent_helper_times_out() {
+        let dir = std::env::temp_dir().join(format!("atlas_ifs_silent_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("silent.cmd");
+        std::fs::write(&fake, "@echo OK\r\n@ping -n 60 127.0.0.1 >nul\r\n").unwrap();
+        let mut h = Helper::spawn(&fake, Path::new("IFS2.dll")).unwrap();
+        let t = std::time::Instant::now();
+        assert!(h.ensure_open(3, Path::new("a.ifs")).is_err());
+        assert!(t.elapsed() >= REPLY_TIMEOUT && t.elapsed() < REPLY_TIMEOUT * 3, "{:?}", t.elapsed());
+        assert_eq!(h.strikes, 1);
+        assert!(h.stuck.contains(&3));
+        // the archive that hung is refused at once
+        let t = std::time::Instant::now();
+        assert!(h.ensure_open(3, Path::new("a.ifs")).is_err());
+        assert!(t.elapsed() < Duration::from_secs(1));
+        // another archive gets a fresh helper, which hangs too: then the helper is given up
+        h.respawn().unwrap();
+        assert!(h.ensure_open(4, Path::new("b.ifs")).is_err());
+        assert!(!h.usable());
+        let t = std::time::Instant::now();
+        assert!(h.ensure_open(5, Path::new("c.ifs")).is_err());
+        assert!(t.elapsed() < Duration::from_secs(1));
+        drop(h);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

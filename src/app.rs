@@ -1426,6 +1426,25 @@ impl Drop for App {
 }
 
 impl eframe::App for App {
+    /// Runs every pass, also the ones without `ui`: eframe falls back to a logic-only pass when a window's redraw is overdue (on
+    /// Windows a resize can swallow `RedrawRequested`). An animation that asks for its next frame only from `ui` would stop for
+    /// good there, so the playing effect keeps asking from here too.
+    ///
+    /// It also undoes a stuck occlusion: after a resize on Windows, winit can report the window occluded and never report it
+    /// visible again; eframe then runs no `ui` pass at all, not even for input, and the window freezes. Unless it is minimised the
+    /// window is painted anyway (a window really covered by another one is then painted too, at least ten times a second).
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let (occluded, minimized) = ctx.input(|i| (i.viewport().occluded == Some(true), i.viewport().minimized == Some(true)));
+        if occluded && !minimized {
+            // the command holds for the next pass: keep passes coming, at most ten a second while nothing else asks for one
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if self.tab == Tab::Effects && self.effects.animating() {
+            ctx.request_repaint();
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Dropping a folder onto the window opens it.
         let dropped = ui.input(|i| i.raw.dropped_files.iter().find_map(|f| Some(f.path().to_path_buf())));

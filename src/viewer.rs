@@ -1015,10 +1015,29 @@ impl Viewer {
             };
             let one = key.blend.is_some_and(|(src, _, _)| src == 2);
             let flags = [state.map_or(0, |st| st.alpha_test), one as u8, 0, 0];
+            // an image not loaded (yet) draws the soft spot rather than a white square
+            let loaded = b.texture.as_ref().map(|t| t.to_ascii_lowercase()).filter(|t| self.textures.contains_key(t));
             let first = vertices.len() as u32;
             vertices.extend(b.vertices.iter().map(|v| GpuVertex { pos: v.pos, normal: [0.0, 0.0, 1.0], uv: v.uv, color: v.color, tint: [255; 4], flags, tangent: [1.0, 0.0, 0.0, 1.0], params: [0.0; 4] }));
-            // an image not loaded (yet) draws the soft spot rather than a white square
-            let texture = Some(b.texture.as_ref().map(|t| t.to_ascii_lowercase()).filter(|t| self.textures.contains_key(t)).unwrap_or_else(|| SOFT_SPOT.to_string()));
+            if loaded.is_none() {
+                // the quads' coordinates pick one cell of an atlas image: stretched over the whole spot instead, or each quad would
+                // show a corner of it (a hard-edged square)
+                for quad in vertices[first as usize..].chunks_mut(6) {
+                    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+                    for v in quad.iter() {
+                        for a in 0..2 {
+                            lo[a] = lo[a].min(v.uv[a]);
+                            hi[a] = hi[a].max(v.uv[a]);
+                        }
+                    }
+                    for v in quad.iter_mut() {
+                        for a in 0..2 {
+                            v.uv[a] = if hi[a] > lo[a] { (v.uv[a] - lo[a]) / (hi[a] - lo[a]) } else { 0.5 };
+                        }
+                    }
+                }
+            }
+            let texture = Some(loaded.unwrap_or_else(|| SOFT_SPOT.to_string()));
             draws.push((first, vertices.len() as u32 - first, key, [texture, None, None]));
         }
         if draws.is_empty() {

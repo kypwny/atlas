@@ -241,6 +241,12 @@ impl Player {
         !self.particles.is_empty() || self.instances.iter().any(|i| !i.stopped)
     }
 
+    /// True while anything other than decals is alive or still to spawn: decals (scorch marks, splats) stay for tens of seconds
+    /// after the effect itself is over.
+    pub fn playing(&self) -> bool {
+        self.particles.iter().any(|p| p.def.elems[p.elem].elem_type != ElemType::Decal) || self.instances.iter().any(|i| !i.stopped)
+    }
+
     /// Stops the looping elements of every effect (what is alive plays out).
     pub fn stop_looping(&mut self) {
         for i in &mut self.instances {

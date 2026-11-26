@@ -63,7 +63,7 @@ usage:
   atlas --nx1info FILE.ff...   the container of Future Warfare (NX1) Xbox 360 fastfiles and their assets by type
   atlas --exportsound GAME_FOLDER|ZONE.ff OUT_DIR [--filter TEXT]   the loaded sounds of Call of Duty 4, Modern Warfare 2 and 3 zones as WAV (search words: length:>2 rate:44100 !name)
   atlas --fxdump GAME_FOLDER ZONE.ff [NAME_PART]   the effects of a Call of Duty Online zone, element by element (spawn, life, velocity and visual samples)
-  atlas --fxrender GAME_FOLDER ZONE.ff EFFECT OUT.png [--at MS,MS,...] [--size W,H] [--dist D] [--forward x|up] [--index MODEL_INDEX.tsv]
+  atlas --fxrender GAME_FOLDER ZONE.ff EFFECT OUT.png [--at MS,MS,...] [--size W,H] [--dist D] [--forward x|up] [--index MODEL_INDEX.tsv] [--no-images]
                                           play an effect without a window and write the frames at the given times side by side
   atlas --t6export ZONE.ff|FOLDER OUT_DIR [--format cast|obj] [--lod N] [--name FILTER]   export every xmodel of a Black Ops II zone (LOD 0 by default)
   atlas --t6unzone ZONE.ff OUT_DIR        a Black Ops II zone as files: raw files, script trees, localize entries, string tables (CSV)
@@ -1287,7 +1287,7 @@ fn fxdump(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `--fxrender GAME_FOLDER ZONE.ff EFFECT OUT.png [--at MS,MS,...] [--size W,H] [--dist D] [--forward x|up] [--index MODEL_INDEX.tsv]`: plays an effect from the
+/// `--fxrender GAME_FOLDER ZONE.ff EFFECT OUT.png [--at MS,MS,...] [--size W,H] [--dist D] [--forward x|up] [--index MODEL_INDEX.tsv] [--no-images]`: plays an effect from the
 /// start and writes the frames at the given times side by side (with `common_mp` read for the materials and effects it starts).
 fn fxrender(args: &[String]) -> Result<()> {
     use atlas::fx::sim::{Frame, Player};
@@ -1300,6 +1300,7 @@ fn fxrender(args: &[String]) -> Result<()> {
     let mut dist = 260.0f32;
     let mut forward = Vec3::Z;
     let mut index_path: Option<PathBuf> = None;
+    let mut no_images = false;
     let mut i = 4;
     while i < args.len() {
         match args[i].as_str() {
@@ -1310,6 +1311,10 @@ fn fxrender(args: &[String]) -> Result<()> {
             }
             "--dist" => dist = args.get(i + 1).context("--dist D")?.parse()?,
             "--index" => index_path = Some(PathBuf::from(args.get(i + 1).context("--index MODEL_INDEX.tsv")?)),
+            "--no-images" => {
+                no_images = true;
+                i -= 1;
+            }
             "--forward" => forward = if args.get(i + 1).map(|s| s.as_str()) == Some("x") { Vec3::X } else { Vec3::Z },
             a => bail!("unknown option {a}"),
         }
@@ -1327,7 +1332,7 @@ fn fxrender(args: &[String]) -> Result<()> {
     let fx = lib.get(name).cloned().with_context(|| format!("no effect {name}"))?;
     let mut v = viewer::Viewer::headless()?;
     let images = source::scan(source::discover(&root), &source::Progress::default());
-    for img in lib.images_for(name) {
+    for img in lib.images_for(name).into_iter().filter(|_| !no_images) {
         match modeltex::load_image(&images, &img) {
             Ok(t) => v.upload_texture(&img, &t),
             Err(e) => eprintln!("{img}: {e:#}"),

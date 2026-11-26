@@ -5,6 +5,7 @@
 
 use super::App;
 use crate::fx::sim::{Frame, Player};
+use crate::fx::def::LoadedModel;
 use crate::fx::{ElemType, Library, Visual};
 use crate::log;
 use crate::modelindex::SurfaceTextures;
@@ -55,6 +56,14 @@ pub(super) struct EffectState {
     /// Restart the loop this many msec after the effect ends.
     idle: f64,
     tex_state: HashMap<String, bool>,
+    /// The effect whose images and models `wanted_*` list.
+    assets_for: Option<String>,
+    wanted_images: Vec<String>,
+    wanted_models: Vec<String>,
+    /// Models effect elements place: `None` while loading or when not found.
+    models: HashMap<String, Option<Arc<LoadedModel>>>,
+    model_tx: Sender<(String, Option<Arc<LoadedModel>>)>,
+    model_rx: Receiver<(String, Option<Arc<LoadedModel>>)>,
     tex_tx: Option<Sender<(String, Result<TexImage, String>)>>,
     tex_rx: Option<Receiver<(String, Result<TexImage, String>)>>,
 }
@@ -62,6 +71,7 @@ pub(super) struct EffectState {
 impl Default for EffectState {
     fn default() -> Self {
         let (tex_tx, tex_rx) = channel();
+        let (model_tx, model_rx) = channel();
         EffectState {
             zones: Vec::new(),
             for_root: None,
@@ -86,6 +96,12 @@ impl Default for EffectState {
             last: None,
             idle: 0.0,
             tex_state: HashMap::new(),
+            assets_for: None,
+            wanted_images: Vec::new(),
+            wanted_models: Vec::new(),
+            models: HashMap::new(),
+            model_tx,
+            model_rx,
             tex_tx: Some(tex_tx),
             tex_rx: Some(tex_rx),
         }
@@ -100,6 +116,11 @@ impl EffectState {
         }
         self.framed = Some(name.to_string());
         true
+    }
+
+    /// An effect is playing: the window needs a new frame continuously.
+    pub(super) fn animating(&self) -> bool {
+        self.playing && self.player.is_some()
     }
 
     pub(super) fn is_busy(&self) -> bool {
@@ -206,22 +227,65 @@ impl App {
                 fx.camera.target = Vec3::new(0.0, 0.0, r * 0.3);
             }
         }
-        // the images it needs
-        if let (Some(lib), Some(images), Some(tx)) = (fx.lib.clone(), self.catalog.clone(), fx.tex_tx.clone()) {
-            let wanted: Vec<String> = lib.images_for(name).into_iter().filter(|k| !fx.tex_state.contains_key(k)).collect();
-            for k in &wanted {
-                fx.tex_state.insert(k.clone(), false);
+    }
+
+    /// Asks for the images and models the playing effect (and what it starts) needs and nobody asked for yet. Runs every frame, so
+    /// what could not be asked for earlier (the image catalogue still being scanned, the model catalogue not there yet) is asked
+    /// for as soon as it can be.
+    fn request_effect_assets(&mut self) {
+        let fx = &mut self.effects;
+        let (Some(lib), Some(name)) = (fx.lib.clone(), fx.selected.clone()) else { return };
+        if fx.assets_for.as_deref() != Some(name.as_str()) {
+            fx.assets_for = Some(name.clone());
+            fx.wanted_images = lib.images_for(&name);
+            fx.wanted_models = lib.models_for(&name);
+        }
+        // models: from the zones the library read, else streamed files with their materials from the model index
+        let new_models: Vec<String> = fx.wanted_models.iter().filter(|m| !fx.models.contains_key(*m)).cloned().collect();
+        if !new_models.is_empty() {
+            let (catalog, index) = (self.models.catalog(), self.models.index());
+            let (tx, ctx) = (fx.model_tx.clone(), self.ctx.clone());
+            for m in &new_models {
+                fx.models.insert(m.clone(), None);
             }
-            if !wanted.is_empty() {
-                let ctx = self.ctx.clone();
-                std::thread::spawn(move || {
-                    for key in wanted {
-                        let r = modeltex::load_image(&images, &key).map_err(|e| format!("{e:#}"));
-                        let _ = tx.send((key, r));
-                        ctx.request_repaint();
+            std::thread::spawn(move || {
+                for m in new_models {
+                    let l = crate::fx::view::find_model(&lib, catalog.as_deref(), index.as_deref(), &m);
+                    if l.is_none() {
+                        log::log(format!("effects: model {m} not found"));
                     }
-                });
+                    let _ = tx.send((m, l));
+                    ctx.request_repaint();
+                }
+            });
+        }
+        let Some(images) = self.catalog.clone() else { return };
+        let mut wanted: Vec<String> = fx.wanted_images.clone();
+        for l in fx.models.values().flatten() {
+            wanted.extend(l.textures.iter().flat_map(|t| [&t.color, &t.normal, &t.spec]).flatten().map(|n| n.to_ascii_lowercase()));
+        }
+        wanted.retain(|k| !fx.tex_state.contains_key(k));
+        wanted.sort();
+        wanted.dedup();
+        if wanted.is_empty() {
+            return;
+        }
+        for k in &wanted {
+            fx.tex_state.insert(k.clone(), false);
+        }
+        let (tx, ctx) = (fx.tex_tx.clone().expect("texture channel"), self.ctx.clone());
+        std::thread::spawn(move || {
+            for key in wanted {
+                let r = modeltex::load_image(&images, &key).map_err(|e| format!("{e:#}"));
+                let _ = tx.send((key, r));
+                ctx.request_repaint();
             }
+        });
+    }
+
+    fn poll_effect_models(&mut self) {
+        while let Ok((name, l)) = self.effects.model_rx.try_recv() {
+            self.effects.models.insert(name, l);
         }
     }
 
@@ -244,6 +308,8 @@ impl App {
     pub(super) fn effects_ui(&mut self, ui: &mut egui::Ui) {
         self.load_effect_zones();
         self.poll_effects();
+        self.poll_effect_models();
+        self.request_effect_assets();
         self.poll_effect_textures();
         if self.root.is_none() {
             egui::CentralPanel::default().show(ui, |ui| ui.label("Open a Call of Duty Online game folder to browse its effects."));
@@ -363,7 +429,7 @@ impl App {
                     p.stop_looping();
                 }
             }
-            ui.checkbox(&mut fx.repeat, "Repeat").on_hover_text("Starts the effect again a second after everything has ended");
+            ui.checkbox(&mut fx.repeat, "Repeat").on_hover_text("Starts the effect again a second after it has ended (decals it left behind do not count)");
             ui.add(egui::Slider::new(&mut fx.speed, 0.05..=4.0).logarithmic(true).text("speed"));
             ui.separator();
             if ui.checkbox(&mut fx.ground, "Ground").on_hover_text("Elements that collide stop on the floor (and start their impact effect)").changed() {
@@ -377,7 +443,16 @@ impl App {
                 replay |= ui.selectable_value(&mut fx.facing, Facing::Forward, "forward: +X").changed();
             });
             if let Some(p) = &fx.player {
-                ui.weak(format!("{:.2} s, {} elements", p.time / 1000.0, p.particle_count()));
+                let state = if p.playing() { "" } else if fx.repeat { ", ended: repeats" } else { ", ended" };
+                ui.weak(format!("{:.2} s, {} elements{state}", p.time / 1000.0, p.particle_count()));
+            }
+            if self.catalog.is_none() {
+                ui.colored_label(Color32::from_rgb(230, 170, 90), "images: waiting for the image catalogue (soft spots until then)");
+            } else {
+                let pending = fx.tex_state.values().filter(|d| !**d).count();
+                if pending > 0 {
+                    ui.weak(format!("loading {pending} images"));
+                }
             }
             ui.weak(self.settings.camera_style.hint());
         });
@@ -397,7 +472,8 @@ impl App {
         let mut restart = false;
         if let (true, Some(p)) = (fx.playing, &mut fx.player) {
             p.update(dt * fx.speed as f64);
-            if !p.active() && fx.selected.is_some() {
+            // decals left behind do not hold the repeat back
+            if !p.playing() && fx.selected.is_some() {
                 fx.idle += dt;
                 if fx.repeat && fx.idle > 1000.0 {
                     restart = true;
@@ -418,8 +494,10 @@ impl App {
                     fx.ground_uploaded = true;
                 }
                 let (eye, right, up) = fx.camera.eye_axes();
-                let batches = player.as_ref().map_or(Vec::new(), |p| crate::fx::view::batches(&p.draw(eye, right, up), right, up));
+                let list = player.as_ref().map(|p| p.draw(eye, right, up));
+                let batches = list.as_ref().map_or(Vec::new(), |l| crate::fx::view::batches(l, right, up));
                 v.set_fx(&batches);
+                v.set_fx_models(&list.as_ref().map_or(Vec::new(), |l| crate::fx::view::models(l, &fx.models)));
                 v.render(size, &fx.camera, Shading::Textured, Cull::None, false, &[true])
             }
             _ => None,
