@@ -62,6 +62,9 @@ usage:
   atlas --zonewalk iw3|iw4|iw5|t6|nx1 FILE|FOLDER [-v] [--dump DIR]   walk the assets of Call of Duty 4, MW2, MW3 or Black Ops II zones (--t6walk = t6)
   atlas --nx1info FILE.ff...   the container of Future Warfare (NX1) Xbox 360 fastfiles and their assets by type
   atlas --exportsound GAME_FOLDER|ZONE.ff OUT_DIR [--filter TEXT]   the loaded sounds of Call of Duty 4, Modern Warfare 2 and 3 zones as WAV (search words: length:>2 rate:44100 !name)
+  atlas --fxdump GAME_FOLDER ZONE.ff [NAME_PART]   the effects of a Call of Duty Online zone, element by element (spawn, life, velocity and visual samples)
+  atlas --fxrender GAME_FOLDER ZONE.ff EFFECT OUT.png [--at MS,MS,...] [--size W,H] [--dist D] [--forward x|up] [--index MODEL_INDEX.tsv]
+                                          play an effect without a window and write the frames at the given times side by side
   atlas --t6export ZONE.ff|FOLDER OUT_DIR [--format cast|obj] [--lod N] [--name FILTER]   export every xmodel of a Black Ops II zone (LOD 0 by default)
   atlas --t6unzone ZONE.ff OUT_DIR        a Black Ops II zone as files: raw files, script trees, localize entries, string tables (CSV)
   atlas --t6buildzone DIR OUT.ff [--keep-signature]   builds the zone from those files: changed files replace their asset, deleted files and rows remove it;
@@ -146,6 +149,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("--animframe") => animframe(&args[1..]),
+        Some("--animdump") => animdump(&args[1..]),
+        Some("--fxdump") => fxdump(&args[1..]),
+        Some("--fxrender") => fxrender(&args[1..]),
+        Some("--skeldump") => skeldump(&args[1..]),
         Some("--replayreport") => {
             let root = path_arg(&args, 1)?;
             let key = zone::export::find_key(&root)?;
@@ -1242,5 +1249,135 @@ fn dumpshaders(args: &[String]) -> Result<()> {
         }
     }
     println!("{written} shader programs written to {dir}");
+    Ok(())
+}
+
+/// `--fxdump GAME_FOLDER ZONE.ff [NAME_PART]`: the effects of a Call of Duty Online zone, element by element.
+fn fxdump(args: &[String]) -> Result<()> {
+    let (Some(root), Some(zone_path)) = (args.first(), args.get(1)) else { bail!("--fxdump GAME_FOLDER ZONE.ff [NAME_PART]") };
+    let key = zone::export::find_key(&PathBuf::from(root))?;
+    let (effects, _, _) = atlas::fx::def::read_zone(&PathBuf::from(zone_path), &key)?;
+    let part = args.get(2).map(|s| s.to_ascii_lowercase());
+    println!("{} effects", effects.len());
+    for fx in effects.iter().filter(|e| part.as_ref().is_none_or(|p| e.name.to_ascii_lowercase().contains(p.as_str()))) {
+        println!("effect {} flags {:#x} size {} loopLife {} looping {} oneShot {} emission {}", fx.name, fx.flags, fx.total_size, fx.looping_life_msec, fx.looping, fx.one_shot, fx.emission);
+        for (i, e) in fx.elems.iter().enumerate() {
+            let vis: Vec<String> = e.visuals.iter().map(|v| v.label().to_string()).collect();
+            println!("  elem {i} {} flags {:#x} spawn {:?} delay {:?} life {:?} sort {} atlas {:?}", e.elem_type.name(), e.flags, e.spawn, e.delay_msec, e.life_msec, e.sort_order, e.atlas);
+            println!("    origin {:?} offR {:?} offH {:?}", e.origin.map(|r| (r.base, r.amp)), (e.offset_radius.base, e.offset_radius.amp), (e.offset_height.base, e.offset_height.amp));
+            println!("    angles {:?} angVel {:?} rot {:?} grav {:?} refl {:?}", e.angles.map(|r| (r.base, r.amp)), e.angular_velocity.map(|r| (r.base, r.amp)), (e.initial_rotation.base, e.initial_rotation.amp), (e.gravity.base, e.gravity.amp), (e.reflection.base, e.reflection.amp));
+            println!("    visuals {vis:?} impact {:?} death {:?} emitted {:?} emitDist {:?}", e.on_impact, e.on_death, e.emitted, (e.emit_dist.base, e.emit_dist.amp));
+            for (j, v) in e.vel.iter().enumerate() {
+                println!("    vel {j} lv {:?}+{:?} ld {:?}+{:?} wv {:?}+{:?} wd {:?}+{:?}", v.local_velocity.base, v.local_velocity.amp, v.local_delta.base, v.local_delta.amp, v.world_velocity.base, v.world_velocity.amp, v.world_delta.base, v.world_delta.amp);
+            }
+            for (j, v) in e.vis.iter().enumerate() {
+                println!("    vis {j} {:?} / {:?}", v.base, v.amp);
+            }
+            if let Some(t) = &e.trail {
+                println!("    trail scroll {} repeat {} split {} {} {} verts {:?} inds {:?}", t.scroll_time_msec, t.repeat_dist, t.inv_split_dist, t.inv_split_arc_dist, t.inv_split_time, t.verts, t.indices);
+            }
+            if let Some(f) = &e.fountain {
+                println!("    fountain {f:?}");
+            }
+            if let Some(atlas::fx::Visual::Material { textures, state, .. }) = e.visuals.first() {
+                println!("    material {:?} {:?}", textures.color, state.map(|s| s.describe()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `--fxrender GAME_FOLDER ZONE.ff EFFECT OUT.png [--at MS,MS,...] [--size W,H] [--dist D] [--forward x|up] [--index MODEL_INDEX.tsv]`: plays an effect from the
+/// start and writes the frames at the given times side by side (with `common_mp` read for the materials and effects it starts).
+fn fxrender(args: &[String]) -> Result<()> {
+    use atlas::fx::sim::{Frame, Player};
+    use glam::Vec3;
+    let (Some(root), Some(zone_path), Some(name), Some(out)) = (args.first(), args.get(1), args.get(2), args.get(3)) else {
+        bail!("--fxrender GAME_FOLDER ZONE.ff EFFECT OUT.png [--at MS,MS,...] [--size W,H] [--dist D] [--forward x|up]")
+    };
+    let mut times = vec![100.0f64, 300.0, 700.0, 1500.0];
+    let mut size = (480u32, 480u32);
+    let mut dist = 260.0f32;
+    let mut forward = Vec3::Z;
+    let mut index_path: Option<PathBuf> = None;
+    let mut i = 4;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--at" => times = args.get(i + 1).context("--at MS,...")?.split(',').filter_map(|x| x.parse().ok()).collect(),
+            "--size" => {
+                let v: Vec<u32> = args.get(i + 1).context("--size W,H")?.split(',').filter_map(|x| x.parse().ok()).collect();
+                size = (*v.first().context("--size W,H")?, *v.get(1).context("--size W,H")?);
+            }
+            "--dist" => dist = args.get(i + 1).context("--dist D")?.parse()?,
+            "--index" => index_path = Some(PathBuf::from(args.get(i + 1).context("--index MODEL_INDEX.tsv")?)),
+            "--forward" => forward = if args.get(i + 1).map(|s| s.as_str()) == Some("x") { Vec3::X } else { Vec3::Z },
+            a => bail!("unknown option {a}"),
+        }
+        i += 2;
+    }
+    let root = PathBuf::from(root);
+    let key = zone::export::find_key(&root)?;
+    let mut lib = atlas::fx::Library::default();
+    let zone_path = PathBuf::from(zone_path);
+    lib.read_zone(&zone_path, &key)?;
+    if let Some(common) = zone::export::zone_files(&root).into_iter().find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("common_mp.ff")) && *p != zone_path) {
+        lib.read_zone(&common, &key)?;
+    }
+    let lib = Arc::new(lib);
+    let fx = lib.get(name).cloned().with_context(|| format!("no effect {name}"))?;
+    let mut v = viewer::Viewer::headless()?;
+    let images = source::scan(source::discover(&root), &source::Progress::default());
+    for img in lib.images_for(name) {
+        match modeltex::load_image(&images, &img) {
+            Ok(t) => v.upload_texture(&img, &t),
+            Err(e) => eprintln!("{img}: {e:#}"),
+        }
+    }
+    let models = modelsource::scan(modelsource::discover(&root));
+    let index = index_path.as_ref().map(|p| modelindex::ModelIndex::load(p)).transpose()?;
+    let mut loaded = std::collections::HashMap::new();
+    for m in lib.models_for(name) {
+        let l = atlas::fx::view::find_model(&lib, Some(&models), index.as_ref(), &m);
+        match &l {
+            Some(l) => {
+                for t in l.textures.iter().flat_map(|t| [&t.color, &t.normal, &t.spec]).flatten() {
+                    if let Ok(img) = modeltex::load_image(&images, t) {
+                        v.upload_texture(t, &img);
+                    }
+                }
+            }
+            None => eprintln!("model {m}: not found"),
+        }
+        loaded.insert(m, l);
+    }
+    let ground = atlas::fx::view::ground_model();
+    let floor = modelindex::MaterialState { sort_key: 0, src: 2, dst: 1, op: 0, alpha_test: 0, cull: 1, depth_write: false, polygon_offset: false, technique: 0 };
+    v.set_model(Some(&ground), &[Default::default()], &[Some(floor)], &[]);
+    let cam = viewer::Camera { dist, radius: dist * 0.5, target: Vec3::new(0.0, 0.0, dist * 0.15), ..Default::default() };
+    let (eye, right, up) = cam.eye_axes();
+    let mut player = Player::new(lib.clone());
+    player.spawn(fx.clone(), Frame::pointing(Vec3::ZERO, forward));
+    let mut strip = vec![0u8; (size.0 as usize * times.len()) * size.1 as usize * 4];
+    let stride = size.0 as usize * times.len() * 4;
+    for (k, &t) in times.iter().enumerate() {
+        while player.time + 1e-6 < t {
+            player.update((t - player.time).min(16.0));
+        }
+        let list = player.draw(eye, right, up);
+        v.set_fx(&atlas::fx::view::batches(&list, right, up));
+        v.set_fx_models(&atlas::fx::view::models(&list, &loaded));
+        v.render(size, &cam, viewer::Shading::Textured, viewer::Cull::None, false, &[true]);
+        let (w, h, px) = v.read_back().context("read-back failed")?;
+        for y in 0..h as usize {
+            let dst = y * stride + k * w as usize * 4;
+            strip[dst..dst + w as usize * 4].copy_from_slice(&px[y * w as usize * 4..(y + 1) * w as usize * 4]);
+        }
+        println!("{t} ms: {} elements, {} batches, {} models, {} lights", player.particle_count(), list.batches.len(), list.models.len(), list.lights.len());
+    }
+    if !player.missing.is_empty() {
+        println!("not found: {}", player.missing.join(", "));
+    }
+    image::save_buffer(out, &strip, size.0 * times.len() as u32, size.1, image::ColorType::Rgba8)?;
+    println!("{} ({} elements) -> {out}", fx.name, fx.elems.len());
     Ok(())
 }

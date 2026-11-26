@@ -18,6 +18,7 @@ Open Call of Duty fastfiles, export models and maps to [Cast](https://github.com
 
 - Browse images (IWI), materials, sounds, models, animations and maps.
 - Export images as PNG, TGA, TIFF or DDS, with normal maps repaired for OpenGL or DirectX.
+- Browse and play the effects of Call of Duty Online zones: sprites, tails, trails, spark fountains, debris models that bounce and settle, and the effects they start.
 - Play and export the loaded sounds of Call of Duty 4, Modern Warfare 2 and Modern Warfare 3 zones as WAV, no game running.
 - Export models and animations to Cast for Blender, or to glTF, OBJ, SEModel and SEAnim, in the unit you pick, with animations baked to a key per frame if you want.
 - Dump string tables, localize strings and raw files to CSV and JSON.
@@ -83,6 +84,17 @@ Black Ops II writes each animation as its own `xanim/<name>.cast`. Import the mo
 ```text
 atlas --t6export ZONE.ff OUT_DIR --format cast --anims "pb_stand_*" --images --ipak IPAK_DIR
 ```
+
+### Effects
+
+Effects tab, pick a Call of Duty Online zone, click an effect to play it. `common_mp` is read with it, for the materials and the effects it starts. R restarts; Repeat plays it again a second after it ends. Ground gives a floor that debris and sparks bounce on and that starts impact effects. Forward picks where the effect points: up (how map and impact effects play) or +X (how `playfx` without a direction plays it, used by most destructible props).
+
+```text
+atlas --fxdump GAME_FOLDER ZONE.ff [NAME_PART]
+atlas --fxrender GAME_FOLDER ZONE.ff EFFECT OUT.png --at 100,500,1500
+```
+
+Not drawn like the game: no lighting or distance fades, the game's own random numbers, and collision only with the floor. Physics debris is a simple bouncing body, not PhysX.
 
 ### Sounds
 

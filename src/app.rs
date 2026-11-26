@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 mod datatab;
 mod extras;
+mod effecttab;
 mod mapview;
 mod materialtab;
 mod soundtab;
@@ -324,6 +325,7 @@ enum Tab {
     Maps,
     Materials,
     Sounds,
+    Effects,
     Data,
 }
 
@@ -371,6 +373,7 @@ struct App {
     sounds: soundtab::SoundState,
     materials: materialtab::MaterialState,
     mapview: mapview::MapView,
+    effects: effecttab::EffectState,
     /// `ATLAS_MAP=<zone file name>`: open that zone's map when the Maps tab has its list (for screenshots).
     pending_map: Option<String>,
     /// The folder the last batch export wrote to.
@@ -441,6 +444,7 @@ impl App {
             sounds: Default::default(),
             materials: Default::default(),
             mapview: Default::default(),
+            effects: Default::default(),
             pending_map: crate::config::env_var("MAP").ok(),
             batch_dir: None,
             focus_search: false,
@@ -471,6 +475,7 @@ impl App {
                     "maps" => app.tab = Tab::Maps,
                     "data" => app.tab = Tab::Data,
                     "sounds" => app.tab = Tab::Sounds,
+                    "effects" => app.tab = Tab::Effects,
                     "materials" => app.tab = Tab::Materials,
                     _ => {}
                 }
@@ -733,6 +738,7 @@ impl App {
             ui.selectable_value(&mut self.tab, Tab::Maps, "Maps");
             ui.selectable_value(&mut self.tab, Tab::Materials, "Materials");
             ui.selectable_value(&mut self.tab, Tab::Sounds, "Sounds");
+            ui.selectable_value(&mut self.tab, Tab::Effects, "Effects");
             ui.selectable_value(&mut self.tab, Tab::Data, "Data");
             ui.separator();
             if ui.button("Open game folder…").clicked() {
@@ -861,6 +867,7 @@ This version's layout is not yet checked against real files here." }
                         Tab::Maps => self.maps.message.clone(),
                         Tab::Materials => self.materials.message.clone(),
                         Tab::Sounds => self.sounds.message.clone(),
+                        Tab::Effects => self.effects.message.clone(),
                         Tab::Data => self.data.message.clone(),
                         Tab::Models => None,
                     };
@@ -1294,6 +1301,8 @@ impl App {
             self.data.rx.is_some()
         } else if self.tab == Tab::Sounds {
             self.sounds.is_busy()
+        } else if self.tab == Tab::Effects {
+            self.effects.is_busy() || self.scan.is_some()
         } else {
             self.preview.loading || self.queue.state.lock().unwrap().inflight.len() > 0 || self.thumbs.len() < self.visible.len().min(12)
         };
@@ -1477,6 +1486,7 @@ impl eframe::App for App {
             Tab::Sounds => {
                 egui::CentralPanel::default().show(ui, |ui| self.sounds_ui(ui));
             }
+            Tab::Effects => self.effects_ui(ui),
             Tab::Data => {
                 egui::CentralPanel::default().show(ui, |ui| self.data_ui(ui));
             }

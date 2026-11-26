@@ -8,6 +8,7 @@ pub mod convert;
 pub mod data;
 pub mod dds;
 pub mod export;
+pub mod fx;
 pub mod gameinfo;
 pub mod hashindex;
 pub mod imgexport;

@@ -119,6 +119,38 @@ pub(crate) fn unpack_unit(v: u32) -> [f32; 3] {
     [(b[0] as f32 - 127.0) * scale, (b[1] as f32 - 127.0) * scale, (b[2] as f32 - 127.0) * scale]
 }
 
+/// Packed 32-byte vertices (`GfxPackedVertex`), as streamed files and zones store them.
+pub fn decode_vertices(vbytes: &[u8]) -> Vec<Vertex> {
+    vbytes
+        .chunks_exact(VERTEX_BYTES)
+        .map(|v| {
+            let f = |o: usize| f32::from_le_bytes(v[o..o + 4].try_into().unwrap());
+            let u = |o: usize| u32::from_le_bytes(v[o..o + 4].try_into().unwrap());
+            let tc = u(20);
+            Vertex {
+                pos: [f(0), f(4), f(8)],
+                binormal_sign: f(12),
+                color: u(16).to_le_bytes(),
+                uv: [half((tc >> 16) as u16), half((tc & 0xFFFF) as u16)], // high half = U, low half = V (checked against an SEModel export)
+                normal: unpack_unit(u(24)),
+                tangent: unpack_unit(u(28)),
+            }
+        })
+        .collect()
+}
+
+/// A rigid surface from a zone's own arrays: 32-byte vertices and `u16` triangles (no skinning data).
+pub fn surface_from_zone(header: &[u8], vbytes: &[u8], ibytes: &[u8]) -> Option<Surface> {
+    let vertices = decode_vertices(vbytes);
+    let indices: Vec<u32> = ibytes.chunks_exact(2).map(|w| u16::from_le_bytes([w[0], w[1]]) as u32).collect();
+    if indices.iter().any(|&i| i as usize >= vertices.len()) {
+        return None;
+    }
+    let mut h = [0u8; 84];
+    h.copy_from_slice(header.get(..84)?);
+    Some(Surface { vertices, indices, rigid: Vec::new(), blend_counts: [0; 4], blend: Vec::new(), header: h })
+}
+
 struct Container {
     blocks: [Vec<u8>; 3],
 }
@@ -225,20 +257,7 @@ impl Model {
             };
             let vbytes = if vert_count > 0 { c.deref(u32_at(h, 32).unwrap(), vert_count * VERTEX_BYTES)? } else { &[][..] };
             let ibytes = if tri_count > 0 { c.deref(u32_at(h, 16).unwrap(), tri_count * 6)? } else { &[][..] };
-            let mut vertices = Vec::with_capacity(vert_count);
-            for v in vbytes.chunks_exact(VERTEX_BYTES) {
-                let f = |o: usize| f32::from_le_bytes(v[o..o + 4].try_into().unwrap());
-                let u = |o: usize| u32::from_le_bytes(v[o..o + 4].try_into().unwrap());
-                let tc = u(20);
-                vertices.push(Vertex {
-                    pos: [f(0), f(4), f(8)],
-                    binormal_sign: f(12),
-                    color: u(16).to_le_bytes(),
-                    uv: [half((tc >> 16) as u16), half((tc & 0xFFFF) as u16)], // high half = U, low half = V (checked against an SEModel export)
-                    normal: unpack_unit(u(24)),
-                    tangent: unpack_unit(u(28)),
-                });
-            }
+            let vertices = decode_vertices(vbytes);
             let indices: Vec<u32> = ibytes.chunks_exact(2).map(|w| u16::from_le_bytes([w[0], w[1]]) as u32).collect();
             if let Some(&bad) = indices.iter().find(|&&x| x as usize >= vert_count) {
                 bail!("surface {i}: index {bad} is outside its {vert_count} vertices");

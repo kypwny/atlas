@@ -203,6 +203,12 @@ impl Camera {
         self.target += (-right * dx + up * dy) * k;
     }
 
+    /// The eye position and the camera's right and up vectors in the world (for camera-facing sprites).
+    pub fn eye_axes(&self) -> (Vec3, Vec3, Vec3) {
+        let (dir, right, up) = self.axes();
+        (self.target + dir * self.dist, right, up)
+    }
+
     /// Where a model-space point lands in a viewport of `size` pixels (origin top left); None behind the camera.
     pub fn project(&self, p: [f32; 3], size: (u32, u32)) -> Option<[f32; 2]> {
         let (vp, _, _) = self.matrices(size.0.max(1) as f32 / size.1.max(1) as f32);
@@ -234,6 +240,50 @@ struct SurfaceDraw {
     index_count: u32,
     first_edge: u32,
     edge_count: u32,
+}
+
+/// A vertex of an effect quad: position, texture coordinate and colour (RGBA).
+#[derive(Clone, Copy, Debug)]
+pub struct FxVertex {
+    pub pos: [f32; 3],
+    pub uv: [f32; 2],
+    pub color: [u8; 4],
+}
+
+/// Effect quads of one material, drawn after the scene in the order given, depth tested but not written.
+pub struct FxBatch {
+    /// The colour image; `None` draws a soft round spot.
+    pub texture: Option<String>,
+    /// Blend and alpha test; `None` is ordinary alpha blending.
+    pub state: Option<MaterialState>,
+    /// Triangles, three vertices each.
+    pub vertices: Vec<FxVertex>,
+}
+
+/// A model an effect places: its mesh, materials and placement (the columns of `axis` are forward, left, up).
+pub struct FxModel<'a> {
+    pub model: &'a Model,
+    pub textures: &'a [SurfaceTextures],
+    pub states: &'a [Option<MaterialState>],
+    pub origin: [f32; 3],
+    pub axis: [[f32; 3]; 3],
+    pub scale: f32,
+}
+
+struct FxModelDraws {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    /// (first index, count, pipeline, texture keys)
+    draws: Vec<(u32, u32, PipeKey, [Option<String>; 3])>,
+}
+
+/// Name under which the soft round spot is kept with the textures.
+pub const SOFT_SPOT: &str = "*soft";
+
+struct FxDraws {
+    vertices: wgpu::Buffer,
+    /// (first vertex, count, pipeline, texture key)
+    draws: Vec<(u32, u32, PipeKey, [Option<String>; 3])>,
 }
 
 struct Scene {
@@ -276,6 +326,9 @@ pub struct Viewer {
     bind_group: wgpu::BindGroup,
     target: Option<Target>,
     scene: Option<Scene>,
+    fx_pipelines: HashMap<PipeKey, wgpu::RenderPipeline>,
+    fx: Option<FxDraws>,
+    fx_models: Option<FxModelDraws>,
 }
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -398,6 +451,19 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32
         default: {}
     }
     return vec4<f32>(rgb, alpha);
+}
+
+// Effects: texture times vertex colour, unlit. flags.x is the alpha test, flags.y = 1 multiplies the colour by alpha (materials
+// that blend with a source factor of one: additive and premultiplied effects fade through alpha too).
+@fragment
+fn fs_fx(i: VOut) -> @location(0) vec4<f32> {
+    let c = textureSample(tex, samp, i.uv) * i.color;
+    if (i.flags.x == 1u && c.a <= 0.0) { discard; }
+    if (i.flags.x == 2u && c.a >= 0.5019608) { discard; }
+    if (i.flags.x == 3u && c.a < 0.5019608) { discard; }
+    var rgb = c.rgb;
+    if (i.flags.y == 1u) { rgb = rgb * c.a; }
+    return vec4<f32>(rgb, c.a);
 }
 
 @fragment
@@ -705,6 +771,20 @@ fn create_gpu_texture(device: &wgpu::Device, queue: &wgpu::Queue, img: &TexImage
     GpuTex { view: texture.create_view(&wgpu::TextureViewDescriptor::default()), clamp: (img.clamp_u, img.clamp_v) }
 }
 
+/// A white spot fading to transparent at its rim: what effects without a loaded image draw.
+fn soft_spot() -> TexImage {
+    let n = 64u32;
+    let mut rgba = Vec::with_capacity((n * n * 4) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            let (dx, dy) = ((x as f32 + 0.5) / n as f32 * 2.0 - 1.0, (y as f32 + 0.5) / n as f32 * 2.0 - 1.0);
+            let a = (1.0 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            rgba.extend_from_slice(&[255, 255, 255, (a * a * 255.0) as u8]);
+        }
+    }
+    TexImage { mips: vec![MipLevel { width: n, height: n, rgba }], clamp_u: true, clamp_v: true }
+}
+
 fn solid_texture(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> GpuTex {
     create_gpu_texture(device, queue, &TexImage { mips: vec![MipLevel { width: 1, height: 1, rgba: rgba.to_vec() }], clamp_u: false, clamp_v: false })
 }
@@ -804,7 +884,9 @@ impl Viewer {
         let flat_normal = solid_texture(&device, &queue, [128, 128, 128, 128]);
         let black = solid_texture(&device, &queue, [0, 0, 0, 0]);
         let samplers = make_samplers(&device);
-        Self { device, queue, renderer, layout, tex_layout, textures: HashMap::new(), groups: HashMap::new(), samplers, white, flat_normal, black, features: 3, module, pipeline_layout, pipelines: HashMap::new(), lines, light_pipes, lights: Vec::new(), light_view: LightView::default(), uniforms, bind_group, target: None, scene: None }
+        let mut textures = HashMap::new();
+        textures.insert(SOFT_SPOT.to_string(), create_gpu_texture(&device, &queue, &soft_spot()));
+        Self { device, queue, renderer, layout, tex_layout, textures, groups: HashMap::new(), samplers, white, flat_normal, black, features: 3, module, pipeline_layout, pipelines: HashMap::new(), lines, light_pipes, lights: Vec::new(), light_view: LightView::default(), uniforms, bind_group, target: None, scene: None, fx_pipelines: HashMap::new(), fx: None, fx_models: None }
     }
 
     /// Uploads a model, replacing the previous one. Returns one entry per surface.
@@ -866,6 +948,85 @@ impl Viewer {
             edges: buf("model_edges", bytemuck::cast_slice(&edges), wgpu::BufferUsages::INDEX),
             draws,
         });
+    }
+
+    /// Replaces the models effects place (drawn lit, with their materials, after the scene and before the effect quads).
+    pub fn set_fx_models(&mut self, models: &[FxModel]) {
+        use wgpu::util::DeviceExt;
+        let mut vertices: Vec<GpuVertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        let mut draws = Vec::new();
+        for m in models {
+            let axis = glam::Mat3::from_cols(m.axis[0].into(), m.axis[1].into(), m.axis[2].into());
+            let origin = Vec3::from(m.origin);
+            for (si, s) in m.model.surfaces.iter().enumerate() {
+                let state = m.states.get(si).copied().flatten();
+                let flags = state.map_or([0u8; 4], |st| [st.alpha_test, st.premultiplied() as u8, 0, 0]);
+                let base = vertices.len() as u32;
+                vertices.extend(s.vertices.iter().map(|v| {
+                    let pos = origin + axis * (Vec3::from(v.pos) * m.scale);
+                    let normal = (axis * Vec3::from(v.normal)).normalize_or_zero();
+                    let tangent = axis * Vec3::from(v.tangent);
+                    GpuVertex { pos: pos.to_array(), normal: normal.to_array(), uv: v.uv, color: v.color, tint: [255; 4], flags, tangent: [tangent.x, tangent.y, tangent.z, v.binormal_sign], params: [0.0; 4] }
+                }));
+                let first = indices.len() as u32;
+                indices.extend(s.indices.iter().map(|i| i + base));
+                let key = PipeKey {
+                    blend: state.filter(|st| st.blended()).map(|st| (st.src, st.dst, st.op)),
+                    cull: state.map_or(1, |st| match st.cull {
+                        1 => 0u8,
+                        3 => 2,
+                        _ => 1,
+                    }),
+                    depth_write: state.is_none_or(|st| st.depth_write),
+                    offset: state.is_some_and(|st| st.polygon_offset),
+                };
+                let t = m.textures.get(si).cloned().unwrap_or_default();
+                draws.push((first, indices.len() as u32 - first, key, [t.color, t.normal, t.spec].map(|n| n.map(|n| n.to_ascii_lowercase()))));
+            }
+        }
+        if draws.is_empty() {
+            self.fx_models = None;
+            return;
+        }
+        let buf = |label: &str, data: &[u8], usage| self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage });
+        self.fx_models = Some(FxModelDraws {
+            vertices: buf("fx_model_vertices", bytemuck::cast_slice(&vertices), wgpu::BufferUsages::VERTEX),
+            indices: buf("fx_model_indices", bytemuck::cast_slice(&indices), wgpu::BufferUsages::INDEX),
+            draws,
+        });
+    }
+
+    /// Replaces the effect quads drawn over the scene (an empty list removes them).
+    pub fn set_fx(&mut self, batches: &[FxBatch]) {
+        use wgpu::util::DeviceExt;
+        let mut vertices: Vec<GpuVertex> = Vec::new();
+        let mut draws = Vec::new();
+        for b in batches {
+            if b.vertices.is_empty() {
+                continue;
+            }
+            let state = b.state;
+            let key = PipeKey {
+                blend: Some(state.filter(|st| st.blended()).map_or((5, 6, 1), |st| (st.src, st.dst, st.op))),
+                cull: 0,
+                depth_write: false,
+                offset: state.is_some_and(|st| st.polygon_offset),
+            };
+            let one = key.blend.is_some_and(|(src, _, _)| src == 2);
+            let flags = [state.map_or(0, |st| st.alpha_test), one as u8, 0, 0];
+            let first = vertices.len() as u32;
+            vertices.extend(b.vertices.iter().map(|v| GpuVertex { pos: v.pos, normal: [0.0, 0.0, 1.0], uv: v.uv, color: v.color, tint: [255; 4], flags, tangent: [1.0, 0.0, 0.0, 1.0], params: [0.0; 4] }));
+            // an image not loaded (yet) draws the soft spot rather than a white square
+            let texture = Some(b.texture.as_ref().map(|t| t.to_ascii_lowercase()).filter(|t| self.textures.contains_key(t)).unwrap_or_else(|| SOFT_SPOT.to_string()));
+            draws.push((first, vertices.len() as u32 - first, key, [texture, None, None]));
+        }
+        if draws.is_empty() {
+            self.fx = None;
+            return;
+        }
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("fx_vertices"), contents: bytemuck::cast_slice(&vertices), usage: wgpu::BufferUsages::VERTEX });
+        self.fx = Some(FxDraws { vertices: buffer, draws });
     }
 
     /// Replaces the light markers (drawn by [`Viewer::render`] when the light view says so).
@@ -999,6 +1160,22 @@ impl Viewer {
                 self.ensure_group(k);
             }
         }
+        let model_keys: Vec<(PipeKey, [Option<String>; 3])> = self.fx_models.as_ref().map_or(Vec::new(), |f| f.draws.iter().map(|d| (d.2, d.3.clone())).collect());
+        for (key, tex) in &model_keys {
+            self.ensure_group(tex);
+            if !self.pipelines.contains_key(key) {
+                let p = build_pipeline(&self.device, &self.module, &self.pipeline_layout, key, wgpu::PrimitiveTopology::TriangleList, "fs_main");
+                self.pipelines.insert(*key, p);
+            }
+        }
+        let fx_keys: Vec<(PipeKey, [Option<String>; 3])> = self.fx.as_ref().map_or(Vec::new(), |f| f.draws.iter().map(|d| (d.2, d.3.clone())).collect());
+        for (key, tex) in &fx_keys {
+            self.ensure_group(tex);
+            if !self.fx_pipelines.contains_key(key) {
+                let p = build_pipeline(&self.device, &self.module, &self.pipeline_layout, key, wgpu::PrimitiveTopology::TriangleList, "fs_fx");
+                self.fx_pipelines.insert(*key, p);
+            }
+        }
         for (_, key) in &plan {
             if !self.pipelines.contains_key(key) {
                 let p = build_pipeline(&self.device, &self.module, &self.pipeline_layout, key, wgpu::PrimitiveTopology::TriangleList, "fs_main");
@@ -1052,6 +1229,25 @@ impl Viewer {
                             pass.draw_indexed(d.first_edge..d.first_edge + d.edge_count, 0, 0..1);
                         }
                     }
+                }
+            }
+            if let Some(m) = &self.fx_models {
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_vertex_buffer(0, m.vertices.slice(..));
+                pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for (first, count, key, tex) in &m.draws {
+                    pass.set_pipeline(&self.pipelines[key]);
+                    pass.set_bind_group(1, &self.groups[tex], &[]);
+                    pass.draw_indexed(*first..*first + *count, 0, 0..1);
+                }
+            }
+            if let Some(fx) = &self.fx {
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_vertex_buffer(0, fx.vertices.slice(..));
+                for (first, count, key, tex) in &fx.draws {
+                    pass.set_pipeline(&self.fx_pipelines[key]);
+                    pass.set_bind_group(1, &self.groups[tex], &[]);
+                    pass.draw(*first..*first + *count, 0..1);
                 }
             }
             if let Some((tris, tri_count, lines, line_count)) = &light_bufs {

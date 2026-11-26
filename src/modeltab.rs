@@ -206,6 +206,11 @@ impl ModelTab {
         });
     }
 
+    /// The catalogue of model files, when the game folder has any.
+    pub fn catalog(&self) -> Option<Arc<ModelCatalog>> {
+        self.catalog.clone()
+    }
+
     /// The model index, when one is loaded.
     pub fn index(&self) -> Option<Arc<ModelIndex>> {
         self.index.clone()

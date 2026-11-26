@@ -154,6 +154,57 @@ pub struct ModelRec {
     pub mat_ref: Vec<u32>,
 }
 
+/// Where one `XSurface` of a zone's `XModelSurfs` and its arrays sit in the zone image.
+#[derive(Debug, Clone, Copy)]
+pub struct SurfMesh {
+    pub header: usize,
+    pub vertices: Option<(usize, usize)>,
+    pub triangles: Option<(usize, usize)>,
+}
+
+/// One visual of an effect element, resolved to a name.
+#[derive(Debug, Clone)]
+pub enum FxVisualRec {
+    /// A material: its name and its index in `Recorder::materials` when the walk saw it.
+    Material(Option<String>, Option<usize>),
+    /// A model: its name.
+    Model(Option<String>),
+    /// A sound alias or an effect (runners) named by a string.
+    Name(Option<String>),
+}
+
+/// An effect element as the walk found it: where its record and arrays sit in the zone image, its visuals and the names of the
+/// effects it starts. Element types are in the CoDOL numbering (stock IW4 types from the trail on are two higher).
+#[derive(Debug, Clone, Default)]
+pub struct FxElemRec {
+    /// Stream offset of the element record (252 bytes stock, 260 CoDOL).
+    pub at: usize,
+    pub elem_type: u8,
+    /// Stream offset of the velocity samples (96 bytes each) and of the visual-state samples (`FxRec::vis_stride` each).
+    pub vel: Option<usize>,
+    pub vis: Option<usize>,
+    /// Visuals in order; a decal has two materials per visual.
+    pub visuals: Vec<FxVisualRec>,
+    pub on_impact: Option<String>,
+    pub on_death: Option<String>,
+    pub emitted: Option<String>,
+    /// Stream offset of the extended definition (trail: 36 bytes, spark fountain: 52), and of the trail's vertices and indices.
+    pub extended: Option<usize>,
+    pub trail_verts: Option<(usize, usize)>,
+    pub trail_inds: Option<(usize, usize)>,
+}
+
+/// An effect (`FxEffectDef`) as the walk found it.
+#[derive(Debug, Clone, Default)]
+pub struct FxRec {
+    pub name: Option<String>,
+    /// Stream offset of the 32-byte header.
+    pub header: usize,
+    /// Bytes per visual-state sample: 48 (IW4, 1.1.1.13) or 64 (QA, 3.19: each state followed by two more words).
+    pub vis_stride: usize,
+    pub elems: Vec<FxElemRec>,
+}
+
 /// A map's drawable geometry as found in its world asset: where the vertices, indices and surface records sit in the zone
 /// image, and the material each surface uses.
 #[derive(Debug, Clone, Default)]
@@ -269,6 +320,9 @@ pub struct Recorder {
     pub data: Vec<DataRec>,
     pub images: HashMap<usize, Option<String>>,
     pub surfs: HashMap<usize, Option<String>>,
+    /// Surfaces header offset -> per surface: (offset of the surface record, (offset, count) of its vertices, (offset, count) of its
+    /// triangles), for the arrays that are in the zone (CoDOL layout; models whose geometry is streamed have none).
+    pub surf_meshes: HashMap<usize, Vec<SurfMesh>>,
     pub techsets: HashMap<usize, Option<String>>,
     /// Shader programs seen inline: (name, bytecode), vertex and pixel shaders alike.
     pub shaders: Vec<(Option<String>, Vec<u8>)>,
@@ -280,6 +334,8 @@ pub struct Recorder {
     pub model_names: HashMap<usize, Option<String>>,
     pub models: Vec<ModelRec>,
     pub anims: Vec<AnimRec>,
+    /// Effects, in zone order (inline ones included).
+    pub effects: Vec<FxRec>,
     /// (alias type, block-3 address) -> start of the inline asset in the zone image.
     pub aliases: HashMap<(u32, u32), usize>,
     g_image_start: i64,
@@ -805,6 +861,7 @@ impl<'a> Replay<'a> {
             self.rec.data.push(DataRec::Header { kind: "surfaces", name: name.clone(), bytes: self.src[h..h + hsize].to_vec() });
             self.rec.surfs.insert(h, name);
         }
+        let mut meshes = Vec::new();
         if self.rd32(h + 4) != 0 {
             let count = self.rd16(h + 8);
             let surfaces = self.bytes(count, stride, 4)?;
@@ -822,9 +879,10 @@ impl<'a> Replay<'a> {
                     self.bytes(blend, 2, 2)?;
                 }
                 self.push(6)?;
+                let mut mesh = SurfMesh { header: s, vertices: None, triangles: None };
                 if self.ptr(s + vp) == INLINE {
                     let n = self.rd16(s + vc);
-                    self.bytes(n, 32, 16)?;
+                    mesh.vertices = Some((self.bytes(n, 32, 16)?, n as usize));
                 }
                 self.pop()?;
                 if self.ptr(s + rp) == INLINE {
@@ -847,10 +905,16 @@ impl<'a> Replay<'a> {
                 self.push(7)?;
                 if self.ptr(s + tri) == INLINE {
                     let n = self.rd16(s + tc);
-                    self.bytes(n, 6, 16)?;
+                    mesh.triangles = Some((self.bytes(n, 6, 16)?, n as usize));
                 }
                 self.pop()?;
+                if self.apply && !self.stock {
+                    meshes.push(mesh);
+                }
             }
+        }
+        if self.apply && !meshes.is_empty() {
+            self.rec.surf_meshes.insert(h, meshes);
         }
         self.pop()
     }
@@ -1281,29 +1345,61 @@ impl<'a> Replay<'a> {
         self.pop()
     }
 
-    fn effect_visual(&mut self, ty: u32, reference: u32, slot: u32) -> Res {
+    fn effect_visual(&mut self, ty: u32, reference: u32, slot: u32) -> Res<Option<FxVisualRec>> {
         self.note_pointer(reference);
         let start = self.pos;
         if ty == 12 || ty == 14 {
-            return if reference != INLINE { Ok(()) } else { self.string() };
+            let name = self.quiet_str(reference, start);
+            if reference == INLINE {
+                self.string()?;
+            }
+            return Ok(Some(FxVisualRec::Name(name)));
         }
         if ty == 10 || ty == 11 {
-            return Ok(());
+            return Ok(None);
         }
         self.asset_reference(reference, if ty == 9 { Kind::Model } else { Kind::Material })?;
         if reference >= INSERT {
             self.record_asset(if ty == 9 { 4 } else { 5 }, slot, start);
         }
-        Ok(())
+        if reference == 0 || !self.apply {
+            return Ok(None);
+        }
+        Ok(Some(if ty == 9 {
+            let header = if reference >= INSERT { Some(start) } else { self.rec.aliases.get(&(4, reference)).copied() };
+            FxVisualRec::Model(header.and_then(|s| self.rec.model_names.get(&s)).cloned().flatten())
+        } else {
+            let at = if reference >= INSERT { usize::try_from(self.rec.g_last_material_start).ok() } else { self.rec.aliases.get(&(5, reference)).copied() };
+            let index = at.and_then(|s| self.rec.material_by_start.get(&s)).copied();
+            FxVisualRec::Material(index.and_then(|m| self.rec.materials[m].name.clone()), index)
+        }))
+    }
+
+    /// Like `str_of`, without noting the reference for the writer (the caller already read the word through `ptr`).
+    fn quiet_str(&self, reference: u32, inline_at: usize) -> Option<String> {
+        match reference {
+            0 => None,
+            INLINE => self.cstr(inline_at),
+            r => self.strings.get(&r).and_then(|&o| self.cstr(o)),
+        }
+    }
+
+    /// A string field of the record at `field`: the name, and the string read when it follows inline.
+    fn effect_name(&mut self, field: usize) -> Res<Option<String>> {
+        let p = self.ptr(field);
+        let name = self.quiet_str(p, self.pos);
+        if p == INLINE {
+            self.string()?;
+        }
+        Ok(name)
     }
 
     fn effect(&mut self) -> Res {
         let h = self.pos;
         self.reserve(0, 32, 4, true)?;
         self.push(3)?;
-        if self.ptr(h) == INLINE {
-            self.string()?;
-        }
+        let mut fx = FxRec { header: h, vis_stride: if self.qa() { 64 } else { 48 }, ..Default::default() };
+        fx.name = self.effect_name(h)?;
         let mut count = 0u64;
         for i in [16usize, 20, 24] {
             let part = self.rd32(h + i);
@@ -1324,49 +1420,52 @@ impl<'a> Replay<'a> {
                 let e = elements + stride * i;
                 let (ty, n) = (self.rd8(e + 176), self.rd8(e + 177));
                 let ty = if self.stock && ty >= 3 { ty + 2 } else { ty };
+                let mut el = FxElemRec { at: e, elem_type: ty as u8, ..Default::default() };
                 if self.rd32(e + 180) != 0 {
                     let c = self.rd8(e + 178) + 1;
-                    self.bytes(c, 96, 4)?;
+                    el.vel = Some(self.bytes(c, 96, 4)?);
                 }
                 if self.rd32(e + 184) != 0 {
                     let c = self.rd8(e + 179) + 1;
-                    self.bytes(c, if self.qa() { 64 } else { 48 }, 4)?;
+                    el.vis = Some(self.bytes(c, if self.qa() { 64 } else { 48 }, 4)?);
                 }
                 if ty == 13 {
                     if self.rd32(e + 188) != 0 {
                         let visual_slots = self.block_three_reference();
                         let visuals = self.bytes(n, 8, 4)?;
                         for j in 0..2 * n as usize {
-                            self.effect_visual(0, self.rd32(visuals + 4 * j), visual_slots + 4 * j as u32)?;
+                            let v = self.effect_visual(0, self.rd32(visuals + 4 * j), visual_slots + 4 * j as u32)?;
+                            el.visuals.push(v.unwrap_or(FxVisualRec::Material(None, None)));
                         }
                     }
                 } else if n <= 1 {
-                    self.effect_visual(ty, self.rd32(e + 188), element_slots + stride as u32 * i as u32 + 188)?;
+                    let v = self.effect_visual(ty, self.rd32(e + 188), element_slots + stride as u32 * i as u32 + 188)?;
+                    el.visuals.extend(v);
                 } else if self.rd32(e + 188) != 0 {
                     let visual_slots = self.block_three_reference();
                     let visuals = self.bytes(n, 4, 4)?;
                     for j in 0..n as usize {
-                        self.effect_visual(ty, self.rd32(visuals + 4 * j), visual_slots + 4 * j as u32)?;
+                        let v = self.effect_visual(ty, self.rd32(visuals + 4 * j), visual_slots + 4 * j as u32)?;
+                        el.visuals.extend(v);
                     }
                 }
-                for j in [216usize, 220, 224] {
-                    if self.ptr(e + j) == INLINE {
-                        self.string()?;
-                    }
-                }
+                el.on_impact = self.effect_name(e + 216)?;
+                el.on_death = self.effect_name(e + 220)?;
+                el.emitted = self.effect_name(e + 224)?;
                 if self.rd32(e + 244) != 0 {
                     if ty == 5 {
                         let trail = self.bytes(1, 36, 4)?;
+                        el.extended = Some(trail);
                         if self.rd32(trail + 24) != 0 {
                             let n = self.rd32(trail + 20);
-                            self.bytes(n, 20, 4)?;
+                            el.trail_verts = Some((self.bytes(n, 20, 4)?, n as usize));
                         }
                         if self.rd32(trail + 32) != 0 {
                             let n = self.rd32(trail + 28);
-                            self.bytes(n, 2, 2)?;
+                            el.trail_inds = Some((self.bytes(n, 2, 2)?, n as usize));
                         }
                     } else if ty == 8 {
-                        self.bytes(1, 52, 4)?;
+                        el.extended = Some(self.bytes(1, 52, 4)?);
                     } else {
                         self.bytes(1, 1, 1)?;
                     }
@@ -1374,7 +1473,11 @@ impl<'a> Replay<'a> {
                 if !self.stock && self.ptr(e + 256) == INLINE {
                     self.string()?;
                 }
+                fx.elems.push(el);
             }
+        }
+        if self.apply {
+            self.rec.effects.push(fx);
         }
         self.pop()
     }
