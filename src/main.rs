@@ -149,10 +149,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("--animframe") => animframe(&args[1..]),
-        Some("--animdump") => animdump(&args[1..]),
         Some("--fxdump") => fxdump(&args[1..]),
         Some("--fxrender") => fxrender(&args[1..]),
-        Some("--skeldump") => skeldump(&args[1..]),
         Some("--replayreport") => {
             let root = path_arg(&args, 1)?;
             let key = zone::export::find_key(&root)?;
